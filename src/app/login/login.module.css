@@ -1,0 +1,208 @@
+.layout {
+  display: grid;
+  align-items: start;
+  gap: 1rem;
+  max-inline-size: 63rem;
+}
+
+.account,
+.telegram {
+  min-inline-size: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+}
+
+.account {
+  display: grid;
+  gap: 1.5rem;
+  padding: clamp(1.25rem, 5vw, 3rem);
+}
+
+.account h1 {
+  max-inline-size: 17ch;
+  font-size: clamp(2rem, 5vw, 3.125rem);
+}
+
+.formStack {
+  display: grid;
+  max-inline-size: 28rem;
+  gap: 1.25rem;
+}
+
+.modeSwitch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.25rem;
+  padding: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--page);
+}
+
+.modeSwitch button {
+  min-block-size: 2.75rem;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.modeSwitch button[aria-pressed="true"] {
+  border-color: var(--border);
+  background: var(--surface);
+  color: var(--primary);
+}
+
+.field {
+  display: grid;
+  gap: 0.375rem;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.field input {
+  min-inline-size: 0;
+  min-block-size: 3rem;
+  padding: 0.625rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 400;
+}
+
+.primaryButton,
+.secondaryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-block-size: 3rem;
+  padding: 0.625rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+  cursor: pointer;
+  scroll-margin-block: 1rem 5rem;
+}
+
+.primaryButton {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--surface);
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 90%, var(--text));
+}
+
+.secondaryButton {
+  background: var(--surface);
+  color: var(--text);
+}
+
+.secondaryButton:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.error,
+.notice {
+  overflow-wrap: anywhere;
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.error {
+  color: var(--negative);
+}
+
+.notice {
+  color: var(--primary);
+}
+
+.identity {
+  display: grid;
+  gap: 0.25rem;
+  padding-block: 1rem;
+  border-block: 1px solid var(--border);
+  overflow-wrap: anywhere;
+}
+
+.identity dt {
+  color: var(--text-secondary);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.accountActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.625rem;
+}
+
+.telegram {
+  display: grid;
+  gap: 0.875rem;
+  padding: clamp(1.25rem, 4vw, 2.25rem);
+  border-block-start: 3px solid var(--primary);
+}
+
+.telegram h2 {
+  font-size: 1.5rem;
+}
+
+.telegram > p,
+.telegramActions > p:not(.error) {
+  color: var(--text-secondary);
+}
+
+.telegramIcon {
+  display: grid;
+  place-items: center;
+  inline-size: 2.75rem;
+  block-size: 2.75rem;
+  border-radius: 0.75rem;
+  background: color-mix(in srgb, var(--primary) 9%, var(--surface));
+  color: var(--primary);
+}
+
+.telegramActions {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.connected {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+}
+
+.connected > svg {
+  flex: none;
+  color: var(--positive);
+}
+
+@media (min-width: 50rem) {
+  .layout {
+    grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr);
+    gap: clamp(1.5rem, 5vw, 6rem);
+  }
+
+  .telegramActions {
+    justify-items: start;
+  }
+}

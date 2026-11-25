@@ -1,0 +1,264 @@
+.page,
+.settings {
+  display: grid;
+  gap: 1.25rem;
+}
+
+.page {
+  max-inline-size: 64rem;
+  gap: clamp(1.5rem, 4vw, 3rem);
+}
+
+.tabs {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.625rem;
+}
+
+.tab {
+  display: grid;
+  grid-template-columns: 2rem minmax(0, 1fr);
+  align-items: center;
+  align-content: center;
+  gap: 0.25rem 0.5rem;
+  min-block-size: 4.75rem;
+  padding: 0.625rem;
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.35;
+  text-align: start;
+  cursor: pointer;
+}
+
+.tab:is(:hover, [aria-selected="true"]) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.tab[aria-disabled="true"] {
+  cursor: wait;
+}
+
+.tabIcon,
+.setupIcon {
+  display: grid;
+  place-items: center;
+  inline-size: 2.25rem;
+  block-size: 2.25rem;
+  border-radius: 0.625rem;
+  background: color-mix(in srgb, var(--primary) 8%, var(--surface));
+  color: var(--primary);
+}
+
+.tabIcon {
+  grid-row: span 2;
+  inline-size: 2rem;
+  block-size: 2rem;
+}
+
+.active {
+  display: inline-flex;
+  grid-column: 2;
+  align-items: center;
+  justify-self: start;
+  gap: 0.25rem;
+  color: var(--primary);
+  font-size: 0.75rem;
+}
+
+.panel {
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+  min-inline-size: 0;
+  padding: clamp(1.25rem, 5vw, 3rem);
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+}
+
+.panel[hidden] {
+  display: none;
+}
+
+.panel h2 {
+  font-size: clamp(1.5rem, 4vw, 2.25rem);
+}
+
+.panel p,
+.inviteDetails label {
+  color: var(--text-secondary);
+}
+
+.setup {
+  display: grid;
+  gap: 1.5rem;
+  margin-block-start: 0.5rem;
+}
+
+.setupBlock {
+  display: grid;
+  align-content: start;
+  gap: 0.75rem;
+  min-inline-size: 0;
+  padding-block-start: 1.25rem;
+  border-block-start: 1px solid var(--border);
+}
+
+.setupBlock > :is(button, a),
+.panel > a,
+.inviteActions > button {
+  justify-self: start;
+}
+
+.codeInput,
+.primaryButton,
+.secondaryButton {
+  min-block-size: 3rem;
+  max-inline-size: 100%;
+  border: 1px solid var(--border);
+  border-radius: 0.625rem;
+  background: var(--surface);
+  color: var(--text);
+  scroll-margin-block: 1rem 5rem;
+}
+
+.codeInput {
+  inline-size: 100%;
+  padding: 0.625rem 0.75rem;
+  font-size: 1rem;
+}
+
+.codeInput::placeholder {
+  color: var(--text-secondary);
+}
+
+.primaryButton,
+.secondaryButton {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  font-weight: 700;
+  line-height: 1.4;
+  text-align: center;
+  cursor: pointer;
+}
+
+.primaryButton {
+  border-color: var(--primary);
+  background: var(--primary);
+  color: var(--surface);
+}
+
+.primaryButton:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--primary) 90%, var(--text));
+}
+
+.secondaryButton:hover:not(:disabled) {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.primaryButton:disabled,
+.secondaryButton:disabled {
+  opacity: 0.65;
+  cursor: wait;
+}
+
+.inviteActions {
+  display: grid;
+  gap: 1rem;
+  margin-block-start: 0.5rem;
+}
+
+.invite {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  max-inline-size: 38rem;
+  padding: clamp(1rem, 3vw, 1.5rem);
+  border: 1px solid color-mix(in srgb, var(--primary) 25%, var(--border));
+  border-radius: var(--card-radius);
+  background: color-mix(in srgb, var(--primary) 5%, var(--surface));
+}
+
+.inviteDetails {
+  display: grid;
+  gap: 0.25rem;
+  min-inline-size: 0;
+  font-size: 0.875rem;
+}
+
+.inviteDetails label {
+  font-weight: 600;
+}
+
+.inviteCode {
+  color: var(--primary);
+  font-size: clamp(1.875rem, 8vw, 2.5rem);
+  font-weight: 700;
+  letter-spacing: 0.175em;
+  line-height: 1.15;
+  user-select: all;
+}
+
+.error,
+.panel .notice {
+  color: var(--negative);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.panel .notice {
+  margin-block-start: 0.25rem;
+  color: var(--primary);
+}
+
+@media (min-width: 44rem) {
+  .tabs {
+    gap: 1rem;
+  }
+
+  .tab {
+    grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    padding: 1rem;
+    font-size: 1rem;
+  }
+
+  .tabIcon {
+    grid-row: auto;
+    inline-size: 2.25rem;
+    block-size: 2.25rem;
+  }
+
+  .active {
+    grid-column: 3;
+  }
+
+  .setup {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 0;
+    padding-block-start: 1.5rem;
+    border-block-start: 1px solid var(--border);
+  }
+
+  .setupBlock {
+    padding: 0 1.5rem 0 0;
+    border-block-start: 0;
+  }
+
+  .setupBlock + .setupBlock {
+    padding: 0 0 0 1.5rem;
+    border-inline-start: 1px solid var(--border);
+  }
+}

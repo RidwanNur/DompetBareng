@@ -1,0 +1,87 @@
+.panel {
+  display: grid;
+  gap: 1.125rem;
+  min-inline-size: 0;
+  padding: clamp(1rem, 3vw, 1.75rem);
+  border: 1px solid var(--border);
+  border-radius: var(--card-radius);
+  background: var(--surface);
+}
+
+.heading,
+.actions,
+.walletActions,
+.fallback {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.heading {
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.actions svg {
+  flex: none;
+  margin-inline-end: 0.375rem;
+}
+
+.actions button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.list {
+  display: grid;
+}
+
+.row {
+  display: grid;
+  grid-template-columns: 2.25rem minmax(0, 1fr);
+  gap: 0.625rem 0.75rem;
+  padding-block: 0.875rem;
+  border-block-start: 1px solid var(--border);
+}
+
+.icon {
+  display: grid;
+  place-items: center;
+  inline-size: 2.25rem;
+  block-size: 2.25rem;
+  border-radius: 0.625rem;
+  background: color-mix(in srgb, var(--primary) 9%, var(--surface));
+  color: var(--primary);
+}
+
+.walletCopy,
+.walletName,
+.balance {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+}
+
+.walletName,
+.balance {
+  font-weight: 700;
+}
+
+.walletActions {
+  grid-column: 1 / -1;
+}
+
+@media (min-width: 48rem) {
+  .panel {
+    margin-block-start: 4.75rem;
+  }
+
+  .row {
+    grid-template-columns: 2.25rem minmax(0, 1fr) auto;
+    align-items: center;
+  }
+
+  .walletActions {
+    grid-column: auto;
+  }
+}
