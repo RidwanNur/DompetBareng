@@ -2,6 +2,7 @@
 
 import { redirect } from "next/navigation";
 import { getAppOrigin, getAuthErrorMessage, isSupabaseConfigured } from "@/lib/auth";
+import { getInternalReturnPath } from "@/lib/navigation";
 import { createClient } from "@/lib/supabase/server";
 
 export type AuthState = {
@@ -36,6 +37,7 @@ export async function authenticate(_previousState: AuthState, formData: FormData
   const emailInput = formData.get("email");
   const email = typeof emailInput === "string" ? emailInput.trim() : "";
   const password = formData.get("password");
+  const returnPath = getInternalReturnPath(formData.get("next"));
   if (
     (intent !== "signin" && intent !== "signup") ||
     !/^[^\s@]+@[^\s@]+$/.test(email) ||
@@ -51,7 +53,7 @@ export async function authenticate(_previousState: AuthState, formData: FormData
     if (error || !data.session) {
       return { error: emailError(error?.code) };
     }
-    redirect("/login");
+    redirect(returnPath ?? "/login");
   }
 
   const origin = await getAppOrigin();
@@ -59,16 +61,18 @@ export async function authenticate(_previousState: AuthState, formData: FormData
     return { error: missingOrigin };
   }
 
+  const confirmUrl = new URL("/auth/confirm", origin);
+  if (returnPath) confirmUrl.searchParams.set("next", returnPath);
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
-    options: { emailRedirectTo: `${origin}/auth/confirm` },
+    options: { emailRedirectTo: confirmUrl.href },
   });
   if (error && error.code !== "user_already_exists") {
     return { error: emailError(error.code) };
   }
   if (data.session) {
-    redirect("/login");
+    redirect(returnPath ?? "/login");
   }
   return { message: "Periksa email untuk mengonfirmasi pendaftaran." };
 }

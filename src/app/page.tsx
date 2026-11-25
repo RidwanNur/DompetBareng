@@ -38,7 +38,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
         {dashboard ? (
           <>
             <DashboardOverview summary={dashboard.summary} workspaceName={dashboard.workspaceName} shared={shareResult} />
-            <RecentTransactions transactions={dashboard.summary.transactions} />
+            <RecentTransactions key={dashboard.summary.workspace_id} workspaceId={dashboard.summary.workspace_id} transactions={dashboard.summary.transactions} />
           </>
         ) : (
           <div className={styles.unavailable} data-reveal data-lift>

@@ -4,6 +4,7 @@ import { Check, Copy, House, KeyRound, LockKeyhole, UsersRound } from "lucide-re
 import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from "react";
 import { WalletManagement } from "@/components/transactions/wallet-management";
 import { formatDateTime } from "@/lib/format";
+import { invitationPath, isInvitationCode } from "@/lib/navigation";
 import type { WorkspaceAction, WorkspaceState, WorkspaceType } from "@/types/database";
 import styles from "./ruang.module.css";
 
@@ -14,15 +15,15 @@ const tabs = [
 
 type WorkspaceResponse = { state: WorkspaceState } | { error: string };
 
-export function WorkspaceSettings({ initialState }: { initialState: WorkspaceState }) {
+export function WorkspaceSettings({ initialState, inviteCode }: { initialState: WorkspaceState; inviteCode?: string }) {
   const [state, setState] = useState(initialState);
   const [view, setView] = useState<WorkspaceType>(
-    initialState.household?.id === initialState.active_workspace_id ? "household" : "personal",
+    inviteCode || initialState.household?.id === initialState.active_workspace_id ? "household" : "personal",
   );
   const [pending, setPending] = useState(false);
-  const [error, setError] = useState("");
-  const [code, setCode] = useState("");
-  const [copiedCode, setCopiedCode] = useState("");
+  const [error, setError] = useState<{ message: string; join?: boolean }>();
+  const [code, setCode] = useState(inviteCode ?? "");
+  const [copied, setCopied] = useState<{ code: string; kind: "code" | "link" }>();
   const tabButtons = useRef<Partial<Record<WorkspaceType, HTMLButtonElement>>>({});
   const { household, invitation } = state;
   const viewedWorkspace = state[view];
@@ -60,7 +61,7 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
 
   async function mutate(action: WorkspaceAction) {
     setPending(true);
-    setError("");
+    setError(undefined);
     try {
       const response = await fetch("/api/workspaces", {
         method: "POST",
@@ -69,13 +70,16 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
       });
       const result: WorkspaceResponse = await response.json();
       if (!response.ok || !("state" in result)) {
-        setError("error" in result ? result.error : "Pengaturan ruang belum bisa disimpan.");
+        setError({
+          message: "error" in result ? result.error : "Pengaturan ruang belum bisa disimpan.",
+          join: action.action === "join",
+        });
         return false;
       }
       setState(result.state);
       return true;
     } catch {
-      setError("Pengaturan ruang belum bisa disimpan. Coba lagi.");
+      setError({ message: "Pengaturan ruang belum bisa disimpan. Coba lagi.", join: action.action === "join" });
       return false;
     } finally {
       setPending(false);
@@ -88,7 +92,7 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
     if (workspace && workspace.id !== state.active_workspace_id) {
       if (!(await mutate({ action: "select", workspace_id: workspace.id }))) return;
     }
-    setError("");
+    setError(undefined);
     setView(type);
   }
 
@@ -105,21 +109,26 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
 
   async function join(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    if (!/^[0-9]{6}$/.test(code)) {
-      setError("Masukkan 6 digit kode undangan.");
+    if (!isInvitationCode(code)) {
+      setError({ message: "Masukkan 6 digit kode undangan.", join: true });
       return;
     }
     if (await mutate({ action: "join", code })) setCode("");
   }
 
-  async function copyInvite() {
+  async function copyInvite(kind: "code" | "link") {
     if (!invitation) return;
-    setError("");
+    setError(undefined);
     try {
-      await navigator.clipboard.writeText(invitation.code);
-      setCopiedCode(invitation.code);
+      const value = kind === "link"
+        ? new URL(invitationPath(invitation.code), window.location.origin).href
+        : invitation.code;
+      await navigator.clipboard.writeText(value);
+      setCopied({ code: invitation.code, kind });
     } catch {
-      setError("Kode belum bisa disalin. Pilih kode untuk menyalinnya.");
+      setError({
+        message: kind === "link" ? "Tautan undangan belum bisa disalin. Coba lagi." : "Kode belum bisa disalin. Pilih kode untuk menyalinnya.",
+      });
     }
   }
 
@@ -153,7 +162,7 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
           );
         })}
       </div>
-      {error && <p className={styles.error} role="alert">{error}</p>}
+      {error && !error.join && <p className={styles.error} role="alert">{error.message}</p>}
       <section
         id="workspace-panel-personal"
         className={styles.panel}
@@ -178,13 +187,18 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
         tabIndex={0}
       >
         <h2>Ruang Rumah Tangga</h2>
-        {household ? (
-          <>
-            <p role="status">
-              {household.member_count === 2 ? "Pasangan sudah bergabung." : "Menunggu pasangan bergabung."}
-            </p>
-            {household.is_owner && household.member_count < 2 && (
-              <div className={styles.inviteActions}>
+        {household && (
+          <p role="status">
+            {household.member_count === 2 ? "Pasangan sudah bergabung." : "Menunggu pasangan bergabung."}
+          </p>
+        )}
+        {household?.member_count !== 2 && (
+          <div className={styles.setup}>
+            {(!household || household.is_owner) && (
+              <div className={styles.setupBlock}>
+                <span className={styles.setupIcon}><KeyRound size={20} strokeWidth={1.7} aria-hidden="true" /></span>
+                <h3>Buat undangan</h3>
+                {!invitation && <p>Kirim kode undangan ke pasangan Anda.</p>}
                 {invitation && (
                   <div className={styles.invite}>
                     <div className={styles.inviteDetails}>
@@ -194,12 +208,17 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
                       </output>
                       <p>Berlaku sampai {formatDateTime(invitation.expires_at)} WIB</p>
                     </div>
-                    <div>
-                      <button className={styles.secondaryButton} type="button" onClick={() => void copyInvite()} disabled={pending}>
+                    <div className={styles.inviteButtons}>
+                      <button className={styles.secondaryButton} type="button" onClick={() => void copyInvite("code")} disabled={pending}>
                         <Copy size={17} aria-hidden="true" /> Salin Kode
                       </button>
-                      {copiedCode === invitation.code && <p className={styles.notice} role="status">Kode disalin.</p>}
+                      <button className={styles.secondaryButton} type="button" onClick={() => void copyInvite("link")} disabled={pending}>
+                        Salin Tautan Undangan
+                      </button>
                     </div>
+                    {copied?.code === invitation.code && (
+                      <p className={styles.notice} role="status">{copied.kind === "link" ? "Tautan undangan disalin." : "Kode disalin."}</p>
+                    )}
                   </div>
                 )}
                 <button
@@ -212,22 +231,6 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
                 </button>
               </div>
             )}
-          </>
-        ) : (
-          <div className={styles.setup}>
-            <div className={styles.setupBlock}>
-              <span className={styles.setupIcon}><KeyRound size={20} strokeWidth={1.7} aria-hidden="true" /></span>
-              <h3>Buat undangan</h3>
-              <p>Kirim kode undangan ke pasangan Anda.</p>
-              <button
-                type="button"
-                className={styles.primaryButton}
-                disabled={pending}
-                onClick={() => void mutate({ action: "create_invite" })}
-              >
-                Buat Kode Undangan
-              </button>
-            </div>
             <form className={styles.setupBlock} onSubmit={join}>
               <span className={styles.setupIcon}><UsersRound size={20} strokeWidth={1.7} aria-hidden="true" /></span>
               <h3>Sudah punya kode undangan?</h3>
@@ -248,6 +251,7 @@ export function WorkspaceSettings({ initialState }: { initialState: WorkspaceSta
               <button className={styles.secondaryButton} type="submit" disabled={pending}>
                 Gabung Ruang Pasangan
               </button>
+              {error?.join && <p className={styles.error} role="alert">{error.message}</p>}
             </form>
           </div>
         )}

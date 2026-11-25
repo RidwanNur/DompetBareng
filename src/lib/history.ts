@@ -3,14 +3,18 @@ import "server-only";
 import { revalidatePath } from "next/cache";
 import { getAppOrigin, getCurrentUser, isSupabaseConfigured } from "@/lib/auth";
 import { createClient } from "@/lib/supabase/server";
+import { moveTransaction } from "@/lib/transaction-move";
 import { getWorkspaceState, isUuid } from "@/lib/workspaces";
 import {
   EXPENSE_CATEGORIES,
   INCOME_CATEGORIES,
+  WALLET_TYPES,
   type HistoryTransaction,
   type Rupiah,
+  type TransactionEditorContext,
   type TransactionHistory,
   type TransactionHistoryFilters,
+  type WorkspaceType,
 } from "@/types/database";
 
 class HistoryError extends Error {
@@ -30,8 +34,9 @@ const timestampPattern =
   /^(?!0000)[0-9]{4}-(?:0[1-9]|1[0-2])-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?(?:Z|[+-](?:0[0-9]|1[0-5]):[0-5][0-9])$/;
 
 type RawFilters = Partial<Record<(typeof filterNames)[number], unknown>>;
+type MutationResponse = { ok: true; moved_to?: WorkspaceType };
 
-export function historyResponse(body: { history: TransactionHistory } | { ok: true } | { error: string }, status = 200) {
+export function historyResponse(body: { history: TransactionHistory } | { editor: TransactionEditorContext } | MutationResponse | { error: string }, status = 200) {
   return Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 }
 
@@ -74,7 +79,9 @@ function readCashFlow(value: Record<string, unknown>) {
 
 async function verifySession() {
   if (!isSupabaseConfigured()) throw new HistoryError(503, unavailable);
-  if (!(await getCurrentUser())) throw new HistoryError(401, "Masuk untuk mengakses riwayat transaksi.");
+  const user = await getCurrentUser();
+  if (!user) throw new HistoryError(401, "Masuk untuk mengakses riwayat transaksi.");
+  return user;
 }
 
 function readFilters(filters: RawFilters) {
@@ -180,6 +187,42 @@ export async function getHistoryFromRequest(request: Request) {
   return queryHistory(workspaceId, filters);
 }
 
+export async function getTransactionEditor(request: Request, transactionId: string): Promise<TransactionEditorContext> {
+  const workspaceId = new URL(request.url).searchParams.get("workspace_id");
+  if (!isUuid(workspaceId) || !isUuid(transactionId)) throw new HistoryError(400, invalidInput);
+
+  const user = await verifySession();
+  const [supabase, state] = await Promise.all([createClient(), getWorkspaceState()]);
+  const workspaces = state.household ? [state.personal, state.household] : [state.personal];
+  const source = workspaceId.toLowerCase();
+  const notFound = "Transaksi tidak ditemukan atau tidak dapat diubah.";
+  if (!workspaces.some(({ id }) => id === source)) throw new HistoryError(404, notFound);
+
+  const [transaction, wallets] = await Promise.all([
+    supabase.from("transactions").select("wallet_id").eq("id", transactionId).eq("workspace_id", source).eq("created_by", user.id).maybeSingle(),
+    supabase.from("wallets").select("id,name,type,archived_at,workspace_id").in("workspace_id", workspaces.map(({ id }) => id))
+      .order("name").order("id"),
+  ]);
+  if (transaction.error || wallets.error) throw new HistoryError(503, unavailable);
+  if (!transaction.data) throw new HistoryError(404, notFound);
+  const walletId: unknown = transaction.data.wallet_id;
+  if (!isUuid(walletId)) throw new HistoryError(503, unavailable);
+
+  return {
+    wallet_id: walletId,
+    workspaces: workspaces.map(({ id, type }) => ({
+      id,
+      type,
+      wallets: (wallets.data ?? []).flatMap((wallet) => {
+        if (wallet.workspace_id !== id || (wallet.archived_at !== null && wallet.id !== walletId)) return [];
+        const walletType = WALLET_TYPES.find((choice) => choice === wallet.type);
+        if (!isUuid(wallet.id) || typeof wallet.name !== "string" || !walletType) throw new HistoryError(503, unavailable);
+        return [{ id: wallet.id, name: wallet.name, type: walletType }];
+      }),
+    })),
+  };
+}
+
 async function readMutation(request: Request) {
   const origin = request.headers.get("origin");
   const site = request.headers.get("sec-fetch-site");
@@ -199,45 +242,88 @@ async function readMutation(request: Request) {
   return { data, workspaceId: data.workspace_id.toLowerCase() };
 }
 
-function readUpdate(data: Record<string, unknown>) {
-  const { item, amount, wallet_id, occurred_at } = data;
+function readEdit(data: Record<string, unknown>) {
+  const { item, amount, occurred_at } = data;
   const flow = readCashFlow(data);
   if (
     typeof item !== "string" || !item.trim() || item.includes("\0") || !isAmount(amount) ||
-    !isUuid(wallet_id) || !isTimestamp(occurred_at) || !flow
+    !isTimestamp(occurred_at) || !flow
   ) {
     throw new HistoryError(400, invalidInput);
   }
   return {
-    p_item: item.trim(),
-    p_amount: amount,
-    p_type: flow.type,
-    p_category: flow.category,
-    p_wallet_id: wallet_id,
-    p_occurred_at: occurred_at,
+    item: item.trim(), amount, occurred_at, ...flow,
   };
 }
 
-export async function changeHistoryTransaction(request: Request, transactionId: string, action: "update" | "delete") {
-  if (!isUuid(transactionId)) throw new HistoryError(400, invalidInput);
-  const { data, workspaceId } = await readMutation(request);
-  const args = { p_workspace_id: workspaceId, p_transaction_id: transactionId.toLowerCase() };
+function readUpdate(data: Record<string, unknown>) {
+  const { wallet_id } = data;
+  if (!isUuid(wallet_id)) throw new HistoryError(400, invalidInput);
+  const { item, amount, type, category, occurred_at } = readEdit(data);
+  return { p_item: item, p_amount: amount, p_type: type, p_category: category, p_wallet_id: wallet_id, p_occurred_at: occurred_at };
+}
+
+async function moveHistoryTransaction(data: Record<string, unknown>, transactionId: string, workspaceId: string) {
+  const { target_workspace_id, target_wallet_id, operation_id } = data;
+  if (
+    !isUuid(target_workspace_id) || target_workspace_id.toLowerCase() === workspaceId ||
+    (target_wallet_id != null && !isUuid(target_wallet_id)) || (operation_id != null && !isUuid(operation_id))
+  ) {
+    throw new HistoryError(400, invalidInput);
+  }
+  const editFields = ["item", "amount", "occurred_at", "type", "category"];
+  const edit = editFields.some((field) => Object.hasOwn(data, field)) ? readEdit(data) : undefined;
+  const result = await moveTransaction({
+    channel: "pwa",
+    transactionId,
+    sourceWorkspaceId: workspaceId,
+    targetWorkspaceId: target_workspace_id,
+    targetWalletId: target_wallet_id ?? undefined,
+    operationId: operation_id ?? undefined,
+    edit,
+  }).catch(() => { throw new HistoryError(503, "Transaksi belum dapat dipindahkan. Coba lagi."); });
+
+  switch (result.status) {
+    case "moved":
+    case "already_moved":
+      return result.transaction.workspace_type;
+    case "not_found":
+      throw new HistoryError(404, "Transaksi tidak ditemukan atau tidak dapat dipindahkan ke ruang itu.");
+    case "invalid_wallet":
+      throw new HistoryError(400, "Pilih dompet aktif di ruang tujuan.");
+    case "invalid_input":
+      throw new HistoryError(400, invalidInput);
+    case "conflict":
+      throw new HistoryError(409, "Transaksi sudah berubah. Muat ulang halaman sebelum mencoba lagi.");
+  }
+}
+
+async function mutateWithinWorkspace(data: Record<string, unknown>, args: { p_workspace_id: string; p_transaction_id: string }, action: "update" | "delete") {
   const supabase = await createClient();
   const result = action === "update"
     ? await supabase.rpc("update_history_transaction", { ...args, ...readUpdate(data) })
     : await supabase.rpc("delete_history_transaction", args);
 
   if (result.error) throw new HistoryError(503, unavailable);
-  if (result.data === "not_found") {
-    throw new HistoryError(404, "Transaksi tidak ditemukan atau tidak dapat diubah.");
-  }
+  if (result.data === "not_found") throw new HistoryError(404, "Transaksi tidak ditemukan atau tidak dapat diubah.");
   if (result.data === "invalid_wallet") throw new HistoryError(400, "Dompet transaksi tidak valid.");
   if (result.data === "invalid_input") throw new HistoryError(400, invalidInput);
-  if (result.data !== (action === "update" ? "updated" : "deleted")) {
-    throw new HistoryError(503, unavailable);
+  if (result.data !== (action === "update" ? "updated" : "deleted")) throw new HistoryError(503, unavailable);
+}
+
+export async function changeHistoryTransaction(request: Request, transactionId: string, action: "update" | "delete"): Promise<MutationResponse> {
+  if (!isUuid(transactionId)) throw new HistoryError(400, invalidInput);
+  const { data, workspaceId } = await readMutation(request);
+  const args = { p_workspace_id: workspaceId, p_transaction_id: transactionId.toLowerCase() };
+  let movedTo: WorkspaceType | undefined;
+  if (action === "update" && Object.hasOwn(data, "target_workspace_id")) {
+    movedTo = await moveHistoryTransaction(data, args.p_transaction_id, workspaceId);
+  } else {
+    await mutateWithinWorkspace(data, args, action);
   }
 
   revalidatePath("/");
   revalidatePath("/riwayat");
   revalidatePath("/laporan");
+  return { ok: true, ...(movedTo && { moved_to: movedTo }) };
 }

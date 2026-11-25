@@ -13,13 +13,14 @@ const emailModes = [
 ] as const;
 type Intent = typeof emailModes[number]["intent"];
 
-function EmailForm({ intent }: { intent: Intent }) {
+function EmailForm({ intent, returnPath }: { intent: Intent; returnPath?: string }) {
   const [state, submit, pending] = useActionState(authenticate, initialState);
   const [email, setEmail] = useState("");
 
   return (
     <form action={submit} className="grid gap-4">
       <input type="hidden" name="intent" value={intent} />
+      {returnPath && <input type="hidden" name="next" value={returnPath} />}
       <label className={styles.field}>
         Email
         <input
@@ -50,7 +51,7 @@ function EmailForm({ intent }: { intent: Intent }) {
   );
 }
 
-export function AuthForm() {
+export function AuthForm({ returnPath }: { returnPath?: string }) {
   const [intent, setIntent] = useState<Intent>("signin");
   const searchParams = useSearchParams();
   const [googleError, setGoogleError] = useState(searchParams.get("error") === "oauth_failed");
@@ -64,9 +65,11 @@ export function AuthForm() {
 
     try {
       const supabase = createClient();
+      const callback = new URL("/auth/callback", window.location.origin);
+      if (returnPath) callback.searchParams.set("next", returnPath);
       const { data, error } = await supabase.auth.signInWithOAuth({
         provider: "google",
-        options: { redirectTo: `${window.location.origin}/auth/callback` },
+        options: { redirectTo: callback.href },
       });
       if (error || !data.url) setGoogleError(true);
     } catch {
@@ -90,7 +93,7 @@ export function AuthForm() {
           </button>
         ))}
       </div>
-      <EmailForm key={intent} intent={intent} />
+      <EmailForm key={intent} intent={intent} returnPath={returnPath} />
       <form onSubmit={signInWithGoogle} className="grid gap-4" aria-busy={googlePending}>
         <button className={styles.secondaryButton} disabled={googlePending} type="submit">
           Masuk dengan Google

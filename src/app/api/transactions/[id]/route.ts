@@ -1,12 +1,20 @@
-import { changeHistoryTransaction, historyFailure, historyResponse } from "@/lib/history";
+import { changeHistoryTransaction, getTransactionEditor, historyFailure, historyResponse } from "@/lib/history";
 
 type TransactionRouteContext = { params: Promise<{ id: string }> };
 
 async function mutate(request: Request, { params }: TransactionRouteContext, action: "update" | "delete") {
   try {
     const { id } = await params;
-    await changeHistoryTransaction(request, id, action);
-    return historyResponse({ ok: true });
+    return historyResponse(await changeHistoryTransaction(request, id, action));
+  } catch (error) {
+    return historyFailure(error);
+  }
+}
+
+export async function GET(request: Request, { params }: TransactionRouteContext) {
+  try {
+    const { id } = await params;
+    return historyResponse({ editor: await getTransactionEditor(request, id) });
   } catch (error) {
     return historyFailure(error);
   }

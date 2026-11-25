@@ -1,5 +1,6 @@
 import { createServerClient, type SetAllCookies } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { invitationPath, isInvitationCode, loginPath } from "@/lib/navigation";
 import { getSupabaseConfig } from "./server";
 
 export async function refreshSession(request: NextRequest) {
@@ -21,9 +22,15 @@ export async function refreshSession(request: NextRequest) {
     },
   });
 
-  await supabase.auth.getClaims();
+  const { data } = await supabase.auth.getClaims();
 
-  const response = NextResponse.next({ request });
+  const invite = request.nextUrl.searchParams.get("invite");
+  const response = !data?.claims.sub && request.nextUrl.pathname === "/ruang" && isInvitationCode(invite)
+    ? NextResponse.redirect(new URL(loginPath(invitationPath(invite)), request.url), {
+        status: 303,
+        headers: { "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer" },
+      })
+    : NextResponse.next({ request });
   for (const { name, value, options } of updatedCookies) {
     response.cookies.set(name, value, options);
   }

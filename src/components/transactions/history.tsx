@@ -123,9 +123,9 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
     }
   }
 
-  function committed(action: "edit" | "delete") {
+  function committed(message: string) {
     setEditing(null);
-    setNotice(action === "edit" ? "Perubahan disimpan." : "Transaksi dihapus.");
+    setNotice(message);
     applyFilters({});
     signalTransactionRefresh();
   }
@@ -208,7 +208,6 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
           key={editing.id}
           transaction={editing}
           workspaceId={workspaceId}
-          wallets={history.wallets}
           onDismiss={() => setEditing(null)}
           onCommitted={committed}
         />

@@ -1,5 +1,6 @@
 import "server-only";
 
+import { isInvitationCode } from "@/lib/navigation";
 import { createClient } from "@/lib/supabase/server";
 import type { WorkspaceAction, WorkspaceState, WorkspaceType } from "@/types/database";
 
@@ -14,10 +15,6 @@ function isObject(value: unknown): value is Record<string, unknown> {
 
 export function isUuid(value: unknown): value is string {
   return typeof value === "string" && value.length === 36 && uuidPattern.test(value);
-}
-
-function isInvitationCode(value: unknown): value is string {
-  return typeof value === "string" && value.length === 6 && /^[0-9]+$/.test(value);
 }
 
 export function parseWorkspaceAction(value: unknown): WorkspaceAction | null {
@@ -131,6 +128,7 @@ export async function updateWorkspaceState(input: WorkspaceAction) {
     case "not_owner":
     case "invalid_code":
     case "already_household":
+    case "household_has_data":
     case "rate_limited":
       return { reason: status } as const;
     default:

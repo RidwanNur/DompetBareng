@@ -1,4 +1,5 @@
 import { NextResponse, type NextRequest } from "next/server";
+import { getInternalReturnPath } from "@/lib/navigation";
 import { refreshSession } from "@/lib/supabase/proxy";
 
 export function proxy(request: NextRequest) {
@@ -11,6 +12,8 @@ export function proxy(request: NextRequest) {
   if (pathname === "/" && code?.trim()) {
     const callback = new URL("/auth/callback", request.url);
     callback.searchParams.set("code", code);
+    const returnPath = getInternalReturnPath(searchParams.get("next"));
+    if (returnPath) callback.searchParams.set("next", returnPath);
     return NextResponse.redirect(callback, {
       status: 303,
       headers: { "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer" },

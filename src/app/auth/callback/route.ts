@@ -1,5 +1,6 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
+import { getInternalReturnPath } from "@/lib/navigation";
 import { getSupabaseConfig } from "@/lib/supabase/server";
 
 const redirectHeaders = { "Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer" };
@@ -13,10 +14,11 @@ function redirectWithinApp(path: string, request: NextRequest) {
 
 export async function GET(request: NextRequest) {
   const code = request.nextUrl.searchParams.get("code");
+  const returnPath = getInternalReturnPath(request.nextUrl.searchParams.get("next"));
   const config = getSupabaseConfig();
   if (code && config) {
     try {
-      const response = redirectWithinApp("/", request);
+      const response = redirectWithinApp(returnPath ?? "/", request);
       const supabase = createServerClient(config.url, config.publishableKey, {
         cookies: {
           getAll: () => request.cookies.getAll(),
@@ -34,5 +36,7 @@ export async function GET(request: NextRequest) {
     }
   }
 
-  return redirectWithinApp("/login?error=oauth_failed", request);
+  const params = new URLSearchParams({ error: "oauth_failed" });
+  if (returnPath) params.set("next", returnPath);
+  return redirectWithinApp("/login?" + params, request);
 }

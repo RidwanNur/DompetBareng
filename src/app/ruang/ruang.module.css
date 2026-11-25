@@ -110,8 +110,7 @@
 }
 
 .setupBlock > :is(button, a),
-.panel > a,
-.inviteActions > button {
+.panel > a {
   justify-self: start;
 }
 
@@ -172,12 +171,6 @@
   cursor: wait;
 }
 
-.inviteActions {
-  display: grid;
-  gap: 1rem;
-  margin-block-start: 0.5rem;
-}
-
 .invite {
   display: flex;
   flex-wrap: wrap;
@@ -200,6 +193,12 @@
 
 .inviteDetails label {
   font-weight: 600;
+}
+
+.inviteButtons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
 }
 
 .inviteCode {

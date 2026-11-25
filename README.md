@@ -27,6 +27,8 @@ npx.cmd supabase@3.4.0 db push --remote=PROJECT_REF --skip-vault
 
 Migrasi dompet juga menyiapkan Supabase Realtime untuk ruang pribadi dan rumah tangga. Perubahan mengirim sinyal privat agar aplikasi memuat ulang saldo dan transaksi dari database.
 
+Untuk proyek yang sudah menerapkan migrasi dompet, jalankan isi [migrasi undangan, ruang Telegram, dan pindah transaksi](supabase/migrations/20261125132742_workspace_routing.sql) di Supabase SQL Editor.
+
 ## Supabase Auth
 
 1. Isi `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, dan `SUPABASE_SECRET_KEY` di `.env.local`. Isi `NEXT_PUBLIC_APP_URL` dengan `http://localhost:3000` untuk pengujian lokal atau origin HTTPS aplikasi di Vercel. Simpan secret key hanya di environment sisi server.

@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import type { WorkspaceType } from "@/types/database";
 
 const botApiOrigin = "https://api.telegram.org";
 const telegramRequestTimeout = 5_000;
@@ -9,18 +10,23 @@ const supportedImageTypes = ["image/jpeg", "image/png", "image/webp"] as const;
 
 type TelegramImageType = (typeof supportedImageTypes)[number];
 type TelegramImage = { fileId: string };
-type TelegramMethod = "getFile" | "sendMessage" | "answerCallbackQuery" | "setChatMenuButton";
+type TelegramMethod = "getFile" | "sendMessage" | "editMessageText" | "answerCallbackQuery" | "setChatMenuButton";
 
-export type TelegramInlineKeyboard = readonly (readonly {
+type TelegramButton = {
   text: string;
-  callback_data: string;
-}[])[];
+} & ({ callback_data: string } | { url: string });
+
+export type TelegramInlineKeyboard = readonly (readonly TelegramButton[])[];
 
 type TelegramForceReply = {
   reply_markup: { force_reply: true; input_field_placeholder?: string };
 };
 
 export const telegramEditPromptPrefix = "Koreksi transaksi";
+export const telegramWorkspaceLabels: Record<WorkspaceType, string> = {
+  personal: "Pribadi",
+  household: "Rumah Tangga",
+};
 
 export class TelegramImageInputError extends Error {}
 
@@ -101,6 +107,34 @@ export function readTelegramLinkCommand(update: unknown) {
   return token ? { token, messageId: envelope.messageId, userId: envelope.userId } : null;
 }
 
+export function readTelegramWorkspaceCommand(update: unknown) {
+  const envelope = readPrivateMessage(update);
+  if (!envelope || typeof envelope.message.text !== "string") return null;
+
+  const command = /^\/(ruang|pribadi|rt)(?:@([A-Za-z0-9_]+))?$/i.exec(envelope.message.text.trim());
+  const botUsername = process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "").toLowerCase();
+  if (!command || (command[2] && command[2].toLowerCase() !== botUsername)) return null;
+
+  const name = command[1].toLowerCase();
+  const workspaceType: WorkspaceType | null = name === "ruang" ? null : name === "pribadi" ? "personal" : "household";
+  return { userId: envelope.userId, workspaceType };
+}
+
+const workspaceTag = /(?<![\p{L}\p{N}_#/@])#(pribadi|p|rumahtangga|rt)(?![\p{L}\p{N}_])/giu;
+
+export function readTelegramWorkspaceTags(text: string | undefined) {
+  const choices = new Set<WorkspaceType>();
+  const withoutTags = text?.replace(workspaceTag, (_tag, label: string) => {
+    choices.add(/^p/i.test(label) ? "personal" : "household");
+    return "";
+  });
+  return {
+    workspaceType: choices.size === 1 ? choices.values().next().value : undefined,
+    conflicts: choices.size > 1,
+    text: choices.size ? withoutTags?.replace(/[^\S\r\n]{2,}/g, " ").trim() || undefined : text,
+  };
+}
+
 function imageFileId(file: unknown) {
   if (!isRecord(file) || typeof file.file_id !== "string" || !file.file_id.trim()) {
     return null;
@@ -163,8 +197,31 @@ export function readTelegramMessage(update: unknown) {
   return text?.trim() || photo ? { userId, messageId, date, text, photo, replyToPromptId } : null;
 }
 
-const callbackPattern =
-  /^(edit|delete):([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})$/;
+const transactionIdPattern =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+function isTransactionId(value: unknown): value is string {
+  return typeof value === "string" && value.length === 36 && transactionIdPattern.test(value);
+}
+
+function isWorkspaceType(value: unknown): value is WorkspaceType {
+  return value === "personal" || value === "household";
+}
+
+function originalTransactionIds(message: Record<string, unknown>) {
+  const markup = message.reply_markup;
+  if (!isRecord(markup) || !Array.isArray(markup.inline_keyboard)) return [];
+
+  const ids = new Set<string>();
+  for (const row of markup.inline_keyboard.slice(0, 20)) {
+    if (!Array.isArray(row)) continue;
+    const button = row.find((candidate) => isRecord(candidate) &&
+      typeof candidate.callback_data === "string" && candidate.callback_data.startsWith("edit:"));
+    const id: unknown = button?.callback_data.slice(5);
+    if (isTransactionId(id)) ids.add(id.toLowerCase());
+  }
+  return [...ids];
+}
 
 export function readTelegramCallback(update: unknown) {
   if (!isRecord(update) || !isRecord(update.callback_query)) return null;
@@ -173,22 +230,35 @@ export function readTelegramCallback(update: unknown) {
   if (
     typeof queryId !== "string" || !queryId.trim() ||
     !isRecord(message) || !isPositiveInteger(message.message_id) ||
-    typeof data !== "string"
+    typeof data !== "string" || Buffer.byteLength(data) > 64
   ) {
     return null;
   }
 
   const userId = privateUserId(from, message.chat);
-  const match = callbackPattern.exec(data);
-  if (userId === null || match?.[0] !== data) return null;
+  if (userId === null) return null;
 
-  return {
-    queryId,
-    userId,
-    messageId: message.message_id,
-    action: match[1] === "edit" ? "edit" as const : "delete" as const,
-    transactionId: match[2],
-  };
+  const base = { queryId, userId, messageId: message.message_id };
+  const parts = data.split(":");
+  const [action, option, id] = parts;
+  if (parts.length === 2 && action === "workspace" && isWorkspaceType(option)) {
+    return { ...base, action, workspaceType: option } as const;
+  }
+  if (parts.length === 3 && action === "move" && isWorkspaceType(option) && isTransactionId(id)) {
+    const transactionId = id.toLowerCase();
+    const messageTransactionIds = originalTransactionIds(message);
+    return {
+      ...base,
+      action,
+      targetWorkspaceType: option,
+      transactionId,
+      messageTransactionIds: messageTransactionIds.includes(transactionId) ? messageTransactionIds : [transactionId],
+    } as const;
+  }
+  if (parts.length === 2 && (action === "edit" || action === "delete") && isTransactionId(option)) {
+    return { ...base, action, transactionId: option } as const;
+  }
+  return null;
 }
 
 function getBotToken() {
@@ -217,6 +287,11 @@ async function callTelegram(method: TelegramMethod, payload: object) {
       }
     } else if (method === "getFile" && response.status === 400) {
       throw new TelegramImageInputError("Foto tidak tersedia di Telegram.");
+    } else if (method === "editMessageText" && response.status === 400) {
+      const body: unknown = await response.json().catch(() => null);
+      if (isRecord(body) && typeof body.description === "string" && body.description.includes("message is not modified")) {
+        return true;
+      }
     }
   } catch (error) {
     if (error instanceof TelegramImageInputError) throw error;
@@ -313,6 +388,18 @@ export async function sendTelegramMessage(chatId: number, text: string, extra?: 
   return { message_id: result.message_id };
 }
 
+export async function editTelegramMessage(chatId: number, messageId: number, text: string, keyboard: TelegramInlineKeyboard) {
+  const result = await callTelegram("editMessageText", {
+    chat_id: chatId,
+    message_id: messageId,
+    text,
+    reply_markup: { inline_keyboard: keyboard },
+  });
+  if (result !== true && !isRecord(result)) {
+    throw new Error("Pesan Telegram tidak dapat diperbarui.");
+  }
+}
+
 export async function answerTelegramCallback(queryId: string, text?: string) {
   const result = await callTelegram("answerCallbackQuery", { callback_query_id: queryId, text });
   if (result !== true) throw new Error("Tombol Telegram tidak dapat diproses.");
@@ -327,6 +414,11 @@ export function getTelegramMenuButtonConfig() {
     return null;
   }
   return { type: "web_app" as const, text: "Buka Dashboard", web_app: { url: url.href } };
+}
+
+export function getTelegramWorkspacePageUrl() {
+  const config = getTelegramMenuButtonConfig();
+  return config ? new URL("/ruang", config.web_app.url).href : null;
 }
 
 export async function setTelegramDashboardMenu(chatId?: number) {

@@ -8,6 +8,10 @@ const failures = {
   household_full: { status: 409, error: "Ruang Rumah Tangga sudah penuh." },
   invalid_code: { status: 404, error: "Kode undangan tidak valid atau sudah kedaluwarsa." },
   already_household: { status: 409, error: "Anda sudah bergabung di Ruang Rumah Tangga." },
+  household_has_data: {
+    status: 409,
+    error: "Ruang Rumah Tangga Anda sudah memiliki transaksi atau riwayat saldo. Gabung dibatalkan untuk menjaga data.",
+  },
   rate_limited: { status: 429, error: "Terlalu banyak percobaan. Coba lagi nanti." },
 };
 

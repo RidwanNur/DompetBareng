@@ -110,6 +110,11 @@ export interface DashboardSummary {
 
 export type HistoryTransaction = DashboardTransaction & Pick<TransactionDetails, "wallet_id">;
 
+export type TransactionEditorContext = {
+  wallet_id: string;
+  workspaces: { id: string; type: WorkspaceType; wallets: Pick<Wallet, "id" | "name" | "type">[] }[];
+};
+
 export type TransactionHistoryFilters = {
   month?: string;
   wallet_id?: string;

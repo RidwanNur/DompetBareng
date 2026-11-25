@@ -60,13 +60,19 @@ export async function getAppOrigin() {
   return null;
 }
 
-export function redirectToLogin(error?: AuthErrorCode) {
+export function authRedirect(path: string) {
   return new Response(null, {
     status: 303,
     headers: {
-      Location: error ? `/login?auth_error=${error}` : "/login",
+      Location: path,
       "Cache-Control": "private, no-store",
       "Referrer-Policy": "no-referrer",
     },
   });
+}
+
+export function redirectToLogin(error: AuthErrorCode, returnPath?: string) {
+  const params = new URLSearchParams({ auth_error: error });
+  if (returnPath) params.set("next", returnPath);
+  return authRedirect("/login?" + params);
 }

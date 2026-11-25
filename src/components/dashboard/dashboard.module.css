@@ -248,6 +248,13 @@
   text-align: end;
 }
 
+.transactionActions {
+  display: grid;
+  min-inline-size: 0;
+  justify-items: end;
+  gap: 0.375rem;
+}
+
 .empty {
   padding-block: 1rem;
   border-block-start: 1px solid var(--border);

@@ -1,6 +1,8 @@
 import { Send } from "lucide-react";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { getAuthErrorMessage, getCurrentUser } from "@/lib/auth";
+import { getInternalReturnPath } from "@/lib/navigation";
 import { getTelegramLinkStatus } from "@/lib/telegram-link";
 import { signOut } from "./actions";
 import { AuthForm } from "./auth-form";
@@ -8,11 +10,13 @@ import styles from "./login.module.css";
 import { TelegramConnect } from "./telegram-connect";
 
 type LoginPageProps = {
-  searchParams: Promise<{ auth_error?: string | string[]; shared?: string | string[] }>;
+  searchParams: Promise<{ auth_error?: string | string[]; shared?: string | string[]; next?: string | string[] }>;
 };
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
-  const [user, { auth_error: authError, shared }] = await Promise.all([getCurrentUser(), searchParams]);
+  const [user, { auth_error: authError, shared, next }] = await Promise.all([getCurrentUser(), searchParams]);
+  const returnPath = getInternalReturnPath(next);
+  if (user && returnPath) redirect(returnPath);
   const authMessage = getAuthErrorMessage(typeof authError === "string" ? authError : undefined);
   const telegramStatus = user ? await getTelegramLinkStatus().catch(() => null) : null;
 
@@ -38,7 +42,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                 </form>
               </div>
             </>
-          ) : <AuthForm />}
+          ) : <AuthForm returnPath={returnPath} />}
         </section>
         <section className={styles.telegram} aria-labelledby="telegram-title" data-reveal data-lift>
           <span className={styles.telegramIcon} aria-hidden="true"><Send size={23} strokeWidth={1.7} /></span>
