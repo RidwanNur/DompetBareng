@@ -1,7 +1,9 @@
 "use client";
 
-import { useActionState, useState } from "react";
-import { authenticate, type AuthState, signInWithGoogle } from "./actions";
+import { useSearchParams } from "next/navigation";
+import { useActionState, useState, type FormEvent } from "react";
+import { createClient } from "@/lib/supabase/client";
+import { authenticate, type AuthState } from "./actions";
 import styles from "./login.module.css";
 
 const initialState: AuthState = {};
@@ -50,7 +52,29 @@ function EmailForm({ intent }: { intent: Intent }) {
 
 export function AuthForm() {
   const [intent, setIntent] = useState<Intent>("signin");
-  const [googleState, googleAction, googlePending] = useActionState(signInWithGoogle, initialState);
+  const searchParams = useSearchParams();
+  const [googleError, setGoogleError] = useState(searchParams.get("error") === "oauth_failed");
+  const [googlePending, setGooglePending] = useState(false);
+
+  async function signInWithGoogle(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (googlePending) return;
+    setGoogleError(false);
+    setGooglePending(true);
+
+    try {
+      const supabase = createClient();
+      const { data, error } = await supabase.auth.signInWithOAuth({
+        provider: "google",
+        options: { redirectTo: `${window.location.origin}/auth/callback` },
+      });
+      if (error || !data.url) setGoogleError(true);
+    } catch {
+      setGoogleError(true);
+    } finally {
+      setGooglePending(false);
+    }
+  }
 
   return (
     <div className={styles.formStack}>
@@ -67,11 +91,11 @@ export function AuthForm() {
         ))}
       </div>
       <EmailForm key={intent} intent={intent} />
-      <form action={googleAction} className="grid gap-4" aria-busy={googlePending}>
+      <form onSubmit={signInWithGoogle} className="grid gap-4" aria-busy={googlePending}>
         <button className={styles.secondaryButton} disabled={googlePending} type="submit">
           Masuk dengan Google
         </button>
-        {googleState.error && <p className={styles.error} role="alert">{googleState.error}</p>}
+        {googleError && <p className={styles.error} role="alert">Tidak bisa masuk dengan Google. Coba lagi.</p>}
       </form>
     </div>
   );
