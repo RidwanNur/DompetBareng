@@ -1,19 +1,21 @@
 import { redirect } from "next/navigation";
 import { MonthlyHealthCard } from "@/components/reports/health-card";
-import { CategoryChart, MonthlySummary, WalletBalances } from "@/components/reports/monthly-summary";
+import { CategoryChart, LargestExpenses, MonthlySummary, WalletBalances } from "@/components/reports/monthly-summary";
 import { ReportControls } from "@/components/reports/report-controls";
 import styles from "@/components/reports/report.module.css";
 import { getCurrentUser } from "@/lib/auth";
-import { getCurrentJakartaMonth, getMonthlyReport } from "@/lib/monthly-report";
+import { getCurrentJakartaMonth, getMonthlyReportPageData } from "@/lib/monthly-report";
 import { getWorkspaceState } from "@/lib/workspaces";
 
 export const dynamic = "force-dynamic";
 
 async function readReport(month: string) {
   const spaces = await getWorkspaceState();
-  const report = await getMonthlyReport(spaces.active_workspace_id, month);
-  const workspaceName = spaces.household?.id === report.workspace_id ? spaces.household.name : spaces.personal.name;
-  return { report, workspaceName };
+  const data = await getMonthlyReportPageData(spaces.active_workspace_id, month);
+  const { household } = spaces;
+  const sharedRoom = household !== null && household.id === data.report.workspace_id;
+  const workspaceName = sharedRoom ? household.name : spaces.personal.name;
+  return { ...data, workspaceName, sharedRoom };
 }
 
 export default async function ReportsPage({ searchParams }: { searchParams: Promise<{ month?: string | string[] }> }) {
@@ -26,7 +28,7 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
   const data = await readReport(month).catch(() => null);
 
   return (
-    <main className="app-main">
+    <main className={`app-main ${styles.reportMain}`}>
       <div className={styles.page}>
         <header className={styles.heading} data-reveal>
           <div>
@@ -37,10 +39,13 @@ export default async function ReportsPage({ searchParams }: { searchParams: Prom
         </header>
         {data ? (
           <>
-            <MonthlySummary report={data.report} />
+            <MonthlySummary report={data.report} details={data.details} />
             <div className={styles.details}>
-              <CategoryChart report={data.report} />
-              <div className={styles.secondaryColumn}>
+              <div className={styles.detailColumn}>
+                <CategoryChart details={data.details} />
+                <LargestExpenses expenses={data.details.largest_expenses} sharedRoom={data.sharedRoom} />
+              </div>
+              <div className={styles.detailColumn}>
                 <MonthlyHealthCard key={data.report.workspace_id + "/" + month} report={data.report} />
                 <WalletBalances report={data.report} />
               </div>

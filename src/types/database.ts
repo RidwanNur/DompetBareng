@@ -117,6 +117,7 @@ export type TransactionEditorContext = {
 
 export type TransactionHistoryFilters = {
   month?: string;
+  type?: HistoryTransaction["type"];
   wallet_id?: string;
   category?: IncomeCategory | ExpenseCategory;
   recorder?: HistoryTransaction["recorded_by"];
@@ -153,4 +154,16 @@ export interface MonthlyReport {
   wallet_balances: { wallet_id: string; wallet_name: string; balance: Rupiah }[];
   analysis: MonthlyAnalysis | null;
   analysis_stale: boolean;
+}
+
+export interface MonthlyReportDetails {
+  month: string;
+  previous_month: (Pick<MonthlyReport, "month" | "total_income" | "total_expense" | "net_cash_flow">) | null;
+  category_stats: (MonthlyReport["category_totals"][number] & { transaction_count: number; percent: string })[];
+  average_daily_expense: Rupiah;
+  largest_expenses: (Pick<TransactionDetails, "id" | "item" | "amount" | "occurred_at"> & {
+    category: ExpenseCategory;
+    wallet_name: string;
+    creator_name?: string;
+  })[];
 }

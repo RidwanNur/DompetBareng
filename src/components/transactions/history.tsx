@@ -4,19 +4,12 @@ import { ArrowDownLeft, ArrowUpRight, Search } from "lucide-react";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { DashboardAmount } from "@/components/dashboard/amount";
 import { formatDate } from "@/lib/format";
+import { historyCategories, historyFilterNames, isHistoryType, readHistoryPageFilters, serializeHistoryFilters } from "@/lib/history-filters";
 import { signalTransactionRefresh, subscribeToWorkspaceRefresh } from "@/lib/transaction-refresh";
-import {
-  EXPENSE_CATEGORIES,
-  INCOME_CATEGORIES,
-  type HistoryTransaction,
-  type TransactionHistory,
-  type TransactionHistoryFilters,
-} from "@/types/database";
+import type { HistoryTransaction, TransactionHistory, TransactionHistoryFilters } from "@/types/database";
 import { TransactionEditor } from "./transaction-editor";
 import styles from "./history.module.css";
 
-const categories = [...new Set([...EXPENSE_CATEGORIES, ...INCOME_CATEGORIES])];
-const defaultFilters: TransactionHistoryFilters = {};
 const historyUnavailable = "Riwayat belum bisa dimuat. Coba lagi.";
 
 async function fetchHistory(workspaceId: string, filters: TransactionHistoryFilters, signal: AbortSignal) {
@@ -31,7 +24,11 @@ async function fetchHistory(workspaceId: string, filters: TransactionHistoryFilt
   return body.history as TransactionHistory;
 }
 
-export function TransactionHistoryView({ initialHistory, sharedRoom }: { initialHistory: TransactionHistory; sharedRoom: boolean }) {
+export function TransactionHistoryView({ initialHistory, initialFilters, sharedRoom }: {
+  initialHistory: TransactionHistory;
+  initialFilters: TransactionHistoryFilters;
+  sharedRoom: boolean;
+}) {
   const workspaceId = initialHistory.workspace_id;
   const [history, setHistory] = useState(initialHistory);
   const [query, setQuery] = useState<TransactionHistoryFilters | null>(null);
@@ -40,13 +37,16 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [editing, setEditing] = useState<HistoryTransaction | null>(null);
+  const filterRequest = useRef<AbortController | null>(null);
   const pageRequest = useRef<AbortController | null>(null);
-  const filters = query ?? defaultFilters;
+  const filters = query ?? initialFilters;
+  const categories = historyCategories(filters.type);
 
   useEffect(() => {
     if (!query) return;
 
     const request = new AbortController();
+    filterRequest.current = request;
     setLoading(true);
     setError("");
 
@@ -64,13 +64,34 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
     return () => {
       window.clearTimeout(delay);
       request.abort();
+      if (filterRequest.current === request) filterRequest.current = null;
     };
   }, [query, workspaceId]);
 
   useEffect(() => () => pageRequest.current?.abort(), []);
 
+  const restoreUrlFilters = useEffectEvent(() => {
+    const { pathname, search } = window.location;
+    if (pathname !== "/riwayat" && pathname !== "/riwayat/") return;
+    const params = new URLSearchParams(search);
+    const requestedFilters = readHistoryPageFilters((name) => {
+      const values = params.getAll(name);
+      return values.length === 1 ? values[0] : undefined;
+    });
+    if (serializeHistoryFilters(requestedFilters).toString() !== serializeHistoryFilters(filters).toString()) {
+      requestHistory(requestedFilters);
+    }
+  });
+
+  useEffect(() => {
+    const restore = () => restoreUrlFilters();
+    restore();
+    window.addEventListener("popstate", restore);
+    return () => window.removeEventListener("popstate", restore);
+  }, []);
+
   const refreshVisibleHistory = useEffectEvent(() => {
-    if (document.visibilityState === "visible") applyFilters({});
+    if (document.visibilityState === "visible") requestHistory({ ...filters });
   });
 
   useEffect(() => {
@@ -85,11 +106,27 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
     };
   }, [workspaceId]);
 
-  function applyFilters(changes: TransactionHistoryFilters) {
+  function requestHistory(nextFilters: TransactionHistoryFilters) {
+    filterRequest.current?.abort();
     pageRequest.current?.abort();
     pageRequest.current = null;
     setPaging(false);
-    setQuery((current) => ({ ...current, ...changes }));
+    setLoading(true);
+    setQuery(nextFilters);
+  }
+
+  function replaceFilters(nextFilters: TransactionHistoryFilters) {
+    const params = serializeHistoryFilters(nextFilters);
+    const current = new URL(window.location.href);
+    const url = new URL(current);
+    for (const name of historyFilterNames) url.searchParams.delete(name);
+    for (const [name, value] of params) url.searchParams.set(name, value);
+    if (url.href !== current.href) window.history.replaceState(null, "", url);
+    if (params.toString() !== serializeHistoryFilters(filters).toString()) requestHistory(nextFilters);
+  }
+
+  function applyFilters(changes: TransactionHistoryFilters) {
+    replaceFilters({ ...filters, ...changes });
   }
 
   async function loadMore() {
@@ -126,7 +163,7 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
   function committed(message: string) {
     setEditing(null);
     setNotice(message);
-    applyFilters({});
+    requestHistory({ ...filters });
     signalTransactionRefresh();
   }
 
@@ -142,6 +179,19 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
           <label className={styles.field}>
             Bulan
             <input name="month" type="month" value={filters.month ?? ""} onChange={(event) => applyFilters({ month: event.target.value })} />
+          </label>
+          <label className={styles.field}>
+            Tipe
+            <select name="type" value={filters.type ?? ""} onChange={(event) => {
+              const choice = event.target.value;
+              const type = isHistoryType(choice) ? choice : undefined;
+              const category = historyCategories(type).find((name) => name === filters.category);
+              applyFilters({ type, category });
+            }}>
+              <option value="">Semua tipe</option>
+              <option value="income">Pemasukan</option>
+              <option value="expense">Pengeluaran</option>
+            </select>
           </label>
           <label className={styles.field}>
             Dompet
@@ -169,7 +219,10 @@ export function TransactionHistoryView({ initialHistory, sharedRoom }: { initial
             </select>
           </label>
         </div>
-        {filters.month && <button className={styles.monthReset} type="button" onClick={() => applyFilters({ month: "" })}>Semua bulan</button>}
+        <div className={styles.filterActions}>
+          {filters.month && <button className={styles.filterAction} type="button" onClick={() => applyFilters({ month: "" })}>Semua bulan</button>}
+          <button className={styles.filterAction} type="button" onClick={() => replaceFilters({})}>Reset Filter</button>
+        </div>
       </section>
       <section className={styles.listCard} aria-label="Daftar transaksi" data-reveal data-lift>
         {notice && <p className={styles.notice} role="status">{notice}</p>}

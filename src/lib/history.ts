@@ -2,6 +2,7 @@ import "server-only";
 
 import { revalidatePath } from "next/cache";
 import { getAppOrigin, getCurrentUser, isSupabaseConfigured } from "@/lib/auth";
+import { historyCategories, historyFilterNames, isHistoryMonth, isHistoryType } from "@/lib/history-filters";
 import { createClient } from "@/lib/supabase/server";
 import { moveTransaction } from "@/lib/transaction-move";
 import { getWorkspaceState, isUuid } from "@/lib/workspaces";
@@ -27,9 +28,7 @@ const unavailable = "Riwayat transaksi belum dapat diproses. Coba lagi.";
 const invalidInput = "Data transaksi tidak valid.";
 const maxAmount = "9223372036854775807";
 const historyPageSize = 25;
-const filterNames = ["month", "wallet_id", "category", "recorder", "search", "before_at", "before_id"] as const;
-const categories = new Set<string>([...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES]);
-const monthPattern = /^(?!0000)[0-9]{4}-(?:0[1-9]|1[0-2])$/;
+const filterNames = [...historyFilterNames, "before_at", "before_id"] as const;
 const timestampPattern =
   /^(?!0000)[0-9]{4}-(?:0[1-9]|1[0-2])-[0-9]{2}T(?:[01][0-9]|2[0-3]):[0-5][0-9]:[0-5][0-9](?:\.[0-9]{1,6})?(?:Z|[+-](?:0[0-9]|1[0-5]):[0-5][0-9])$/;
 
@@ -87,6 +86,7 @@ async function verifySession() {
 function readFilters(filters: RawFilters) {
   const optional = (value: unknown) => value === "" ? undefined : value;
   const month = optional(filters.month);
+  const type = optional(filters.type);
   const walletId = optional(filters.wallet_id);
   const category = optional(filters.category);
   const recorder = optional(filters.recorder);
@@ -94,9 +94,10 @@ function readFilters(filters: RawFilters) {
   const beforeAt = optional(filters.before_at);
   const beforeId = optional(filters.before_id);
   if (
-    (month !== undefined && (typeof month !== "string" || month.length !== 7 || !monthPattern.test(month))) ||
+    (month !== undefined && !isHistoryMonth(month)) ||
+    (type !== undefined && !isHistoryType(type)) ||
     (walletId !== undefined && !isUuid(walletId)) ||
-    (category !== undefined && (typeof category !== "string" || !categories.has(category))) ||
+    (category !== undefined && !historyCategories(type).some((name) => name === category)) ||
     (recorder !== undefined && recorder !== "self" && recorder !== "partner") ||
     (search !== undefined && (typeof search !== "string" || search.includes("\0"))) ||
     (beforeAt !== undefined && !isTimestamp(beforeAt)) ||
@@ -114,6 +115,7 @@ function readFilters(filters: RawFilters) {
     p_search: search?.trim() || null,
     p_before_at: beforeAt ?? null,
     p_before_id: beforeId ?? null,
+    ...(type && { p_type: type }),
   };
 }
 

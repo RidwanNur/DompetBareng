@@ -5,7 +5,7 @@ import { generateMonthlyAnalysis, readMonthlyAnalysis } from "@/lib/gemini";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
 import { getWorkspaceState, isUuid } from "@/lib/workspaces";
-import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, type MonthlyReport, type Rupiah } from "@/types/database";
+import { EXPENSE_CATEGORIES, INCOME_CATEGORIES, type MonthlyReport, type MonthlyReportDetails, type Rupiah } from "@/types/database";
 
 class ReportError extends Error {
   constructor(readonly status: number, message: string) {
@@ -19,6 +19,7 @@ const unavailable = "Laporan bulanan belum dapat diproses. Coba lagi.";
 const unavailableAnalysis = "Ringkasan AI belum dapat dibuat. Coba lagi.";
 const denied = "Anda tidak tergabung dalam ruang ini.";
 const jakartaMonth = new Intl.DateTimeFormat("en-US", { timeZone: "Asia/Jakarta", year: "numeric", month: "2-digit" });
+const reportMonthPattern = /^(?!0000)[0-9]{4}-(?:0[1-9]|1[0-2])$/;
 
 export function getCurrentJakartaMonth(now = new Date()) {
   const parts = jakartaMonth.formatToParts(now);
@@ -43,7 +44,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function reportTarget(workspaceId: unknown, month: unknown) {
   if (!isUuid(workspaceId)) throw new ReportError(400, "Ruang laporan tidak valid.");
-  if (typeof month !== "string" || month.length !== 7 || !/^(?!0000)[0-9]{4}-(?:0[1-9]|1[0-2])$/.test(month)) {
+  if (typeof month !== "string" || month.length !== 7 || !reportMonthPattern.test(month)) {
     throw new ReportError(400, "Bulan laporan tidak valid.");
   }
   return { p_workspace_id: workspaceId.toLowerCase(), p_month: month };
@@ -131,6 +132,63 @@ async function queryReport(supabase: ReportClient, target: ReturnType<typeof rep
 export async function getMonthlyReport(workspaceId: string, month: string): Promise<MonthlyReport> {
   const target = reportTarget(workspaceId, month);
   return queryReport(await createClient(), target);
+}
+
+function readPreviousMonth(value: unknown): MonthlyReportDetails["previous_month"] {
+  if (value === null) return null;
+  if (!isRecord(value) || typeof value.month !== "string" || !reportMonthPattern.test(value.month)) {
+    throw new ReportError(503, unavailable);
+  }
+  return {
+    month: value.month,
+    total_income: readMoney(value.total_income),
+    total_expense: readMoney(value.total_expense),
+    net_cash_flow: readMoney(value.net_cash_flow, true),
+  };
+}
+
+function readCategoryStats(value: unknown): MonthlyReportDetails["category_stats"][number] {
+  if (!isRecord(value)) throw new ReportError(503, unavailable);
+  const { percent, transaction_count } = value;
+  if (typeof percent !== "string" || !/^(?:100|[1-9][0-9]?|0)(?:\.[0-9]{1,2})?$/.test(percent) || Number(percent) > 100 ||
+    typeof transaction_count !== "number" || !Number.isSafeInteger(transaction_count) || transaction_count < 1) {
+    throw new ReportError(503, unavailable);
+  }
+  return { ...readCategory(value), percent, transaction_count };
+}
+
+function readLargestTransaction(value: unknown): MonthlyReportDetails["largest_expenses"][number] {
+  if (!isRecord(value)) throw new ReportError(503, unavailable);
+  const { id, item, occurred_at, wallet_name, creator_name } = value;
+  const category = EXPENSE_CATEGORIES.find((entry) => entry === value.category);
+  if (!isUuid(id) || !category || typeof item !== "string" || !item.trim() ||
+    typeof occurred_at !== "string" || !Number.isFinite(Date.parse(occurred_at)) ||
+    typeof wallet_name !== "string" || !wallet_name.trim() ||
+    (creator_name !== undefined && (typeof creator_name !== "string" || !creator_name.trim()))) {
+    throw new ReportError(503, unavailable);
+  }
+  return { id, item, amount: readMoney(value.amount), occurred_at, wallet_name, category, ...(creator_name && { creator_name }) };
+}
+
+export async function getMonthlyReportPageData(workspaceId: string, month: string) {
+  const target = reportTarget(workspaceId, month);
+  const supabase = await createClient();
+  const { data, error } = await supabase.rpc("get_monthly_report_details", target);
+  if (error) throw new ReportError(503, unavailable);
+  if (data === null) throw new ReportError(403, denied);
+  if (!isRecord(data) || data.workspace_id !== target.p_workspace_id || data.month !== target.p_month ||
+    !Array.isArray(data.category_stats) || !Array.isArray(data.largest_expenses) || data.largest_expenses.length > 3) {
+    throw new ReportError(503, unavailable);
+  }
+
+  const details: MonthlyReportDetails = {
+    month,
+    previous_month: readPreviousMonth(data.previous_month),
+    category_stats: data.category_stats.map(readCategoryStats),
+    average_daily_expense: readMoney(data.average_daily_expense),
+    largest_expenses: data.largest_expenses.map(readLargestTransaction),
+  };
+  return { report: readReport(data.base_report, target), details };
 }
 
 async function requireSession() {
