@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
+import { isTelegramReportMonth } from "@/lib/telegram-report-date";
 import type { WorkspaceType } from "@/types/database";
 
 const botApiOrigin = "https://api.telegram.org";
@@ -107,17 +108,52 @@ export function readTelegramLinkCommand(update: unknown) {
   return token ? { token, messageId: envelope.messageId, userId: envelope.userId } : null;
 }
 
+function matchesBotAlias(alias: string | undefined) {
+  if (!alias) return true;
+  const username = process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "").toLowerCase();
+  return alias.toLowerCase() === username;
+}
+
 export function readTelegramWorkspaceCommand(update: unknown) {
   const envelope = readPrivateMessage(update);
   if (!envelope || typeof envelope.message.text !== "string") return null;
 
   const command = /^\/(ruang|pribadi|rt)(?:@([A-Za-z0-9_]+))?$/i.exec(envelope.message.text.trim());
-  const botUsername = process.env.TELEGRAM_BOT_USERNAME?.trim().replace(/^@/, "").toLowerCase();
-  if (!command || (command[2] && command[2].toLowerCase() !== botUsername)) return null;
+  if (!command || !matchesBotAlias(command[2])) return null;
 
   const name = command[1].toLowerCase();
   const workspaceType: WorkspaceType | null = name === "ruang" ? null : name === "pribadi" ? "personal" : "household";
   return { userId: envelope.userId, workspaceType };
+}
+
+const quickCommands = {
+  menu: "menu",
+  bantuan: "menu",
+  saldo: "balance",
+  riwayat: "history",
+  hariini: "today",
+  laporan: "monthly",
+} as const;
+
+export type TelegramQuickView = (typeof quickCommands)[keyof typeof quickCommands];
+
+export function readTelegramQuickCommand(update: unknown) {
+  const envelope = readPrivateMessage(update);
+  if (!envelope || typeof envelope.message.text !== "string") return null;
+
+  const command = /^\/(menu|bantuan|saldo|riwayat|hariini|laporan)(?:@([A-Za-z0-9_]+))?(?:\s+([\s\S]+))?$/i
+    .exec(envelope.message.text.trim());
+  if (!command || !matchesBotAlias(command[2])) return null;
+
+  const view = quickCommands[command[1].toLowerCase() as keyof typeof quickCommands];
+  const tagged = readTelegramWorkspaceTags(command[3]);
+  return {
+    userId: envelope.userId,
+    view,
+    argument: tagged.text?.trim() ?? "",
+    workspaceType: tagged.workspaceType,
+    conflicts: tagged.conflicts,
+  };
 }
 
 const workspaceTag = /(?<![\p{L}\p{N}_#/@])#(pribadi|p|rumahtangga|rt)(?![\p{L}\p{N}_])/giu;
@@ -208,6 +244,29 @@ function isWorkspaceType(value: unknown): value is WorkspaceType {
   return value === "personal" || value === "household";
 }
 
+type QuickCallback = {
+  view: TelegramQuickView | "workspace";
+  month?: string;
+  workspaceType?: WorkspaceType;
+};
+
+function readQuickCallback(parts: string[]): QuickCallback | null {
+  const [, view, option, room] = parts;
+  if (view === "monthly" && isTelegramReportMonth(option)) {
+    if (parts.length === 3) return { view, month: option };
+    if (parts.length === 4 && isWorkspaceType(room)) return { view, month: option, workspaceType: room };
+    return null;
+  }
+  if (
+    view !== "menu" && view !== "balance" && view !== "history" &&
+    view !== "today" && view !== "monthly" && view !== "workspace"
+  ) return null;
+
+  if (parts.length === 2) return { view };
+  if (parts.length === 3 && isWorkspaceType(option)) return { view, workspaceType: option };
+  return null;
+}
+
 function originalTransactionIds(message: Record<string, unknown>) {
   const markup = message.reply_markup;
   if (!isRecord(markup) || !Array.isArray(markup.inline_keyboard)) return [];
@@ -241,6 +300,10 @@ export function readTelegramCallback(update: unknown) {
   const base = { queryId, userId, messageId: message.message_id };
   const parts = data.split(":");
   const [action, option, id] = parts;
+  if (action === "quick") {
+    const selection = readQuickCallback(parts);
+    return selection ? { ...base, action, ...selection } as const : null;
+  }
   if (parts.length === 2 && action === "workspace" && isWorkspaceType(option)) {
     return { ...base, action, workspaceType: option } as const;
   }

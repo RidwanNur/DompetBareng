@@ -9,6 +9,7 @@ import {
   readTelegramCallback,
   readTelegramLinkCommand,
   readTelegramMessage,
+  readTelegramQuickCommand,
   readTelegramWorkspaceCommand,
   readTelegramWorkspaceTags,
   sendTelegramMessage,
@@ -21,6 +22,8 @@ import {
   type TelegramInlineKeyboard,
 } from "@/lib/telegram";
 import { redeemTelegramLink, type TelegramLinkResult } from "@/lib/telegram-link";
+import { getTelegramQuickReport, renderTelegramQuickReport } from "@/lib/telegram-quick-reports";
+import { parseTelegramReportMonth } from "@/lib/telegram-report-date";
 import {
   beginTelegramInput,
   deleteTelegramTransaction,
@@ -49,6 +52,7 @@ const replies: Record<Exclude<TelegramLinkResult, "duplicate">, string> = {
 
 type TelegramMessage = NonNullable<ReturnType<typeof readTelegramMessage>>;
 type TelegramCallback = NonNullable<ReturnType<typeof readTelegramCallback>>;
+type TelegramQuickCommand = NonNullable<ReturnType<typeof readTelegramQuickCommand>>;
 
 const missingTransaction = "Transaksi tidak ditemukan atau tidak dapat diubah.";
 const connectTelegram = "Hubungkan akun Telegram dari DompetBareng terlebih dahulu.";
@@ -57,6 +61,12 @@ const workspaceKeyboard: TelegramInlineKeyboard = [[
   { text: "Pribadi", callback_data: "workspace:personal" },
   { text: "Rumah Tangga", callback_data: "workspace:household" },
 ]];
+const quickMenu: TelegramInlineKeyboard = [
+  [{ text: "Saldo", callback_data: "quick:balance" }, { text: "Laporan Bulan Ini", callback_data: "quick:monthly" }],
+  [{ text: "5 Riwayat", callback_data: "quick:history" }, { text: "Hari Ini", callback_data: "quick:today" }],
+  [{ text: "Ganti Ruang", callback_data: "quick:workspace" }],
+];
+const invalidMonth = "Format bulan belum valid. Coba /laporan bulan lalu, /laporan nov 2026, /laporan 10/2026, atau /laporan 2026-10.";
 
 function emptyResponse(status = 200) {
   return new Response(null, { status, headers });
@@ -118,6 +128,57 @@ async function handleWorkspaceCommand(userId: number, workspaceType: WorkspaceTy
   return reply(userId, workspaceStatus(workspaceType), workspaceKeyboard);
 }
 
+function replyQuickMenu(userId: number) {
+  return reply(userId, "Akses cepat DompetBareng\nPilih menu di bawah. Gunakan tag #pribadi atau #rt pada perintah untuk memilih ruang.", quickMenu);
+}
+
+async function replyQuickReport(query: Parameters<typeof getTelegramQuickReport>[0], editMessageId?: number) {
+  const result = await getTelegramQuickReport(query);
+  const { userId } = query;
+  if (result.status === "unlinked") return reply(userId, connectTelegram);
+  if (result.status === "workspace_unavailable") return replyWithoutHousehold(userId);
+  if (result.status !== "ok") return reply(userId, query.view === "monthly" ? invalidMonth : "Ringkasan belum bisa dibuka.");
+
+  const { messages, keyboard } = renderTelegramQuickReport(result.report);
+  if (editMessageId !== undefined) {
+    await editTelegramMessage(userId, editMessageId, messages[0], keyboard ?? []);
+    return emptyResponse();
+  }
+
+  // Daftar dompet yang panjang tetap bisa dikirim dalam beberapa pesan.
+  const last = messages.length - 1;
+  for (const text of messages.slice(0, last)) await sendTelegramMessage(userId, text);
+  return reply(userId, messages[last], keyboard);
+}
+
+function handleQuickCommand({ userId, view, workspaceType, argument, conflicts }: TelegramQuickCommand) {
+  if (view === "menu") return replyQuickMenu(userId);
+  if (conflicts) return reply(userId, "Pilih satu tag ruang, #pribadi atau #rt.");
+  if (view === "monthly") {
+    const month = parseTelegramReportMonth(argument);
+    return month ? replyQuickReport({ userId, view, workspaceType, month }) : reply(userId, invalidMonth);
+  }
+  if (argument) return reply(userId, "Tambahkan tag #pribadi atau #rt untuk memilih ruang.");
+  return replyQuickReport({ userId, view, workspaceType });
+}
+
+async function handleQuickCallback({ queryId, userId, messageId, view, month, workspaceType }: Extract<TelegramCallback, { action: "quick" }>) {
+  const acknowledged = answerTelegramCallback(queryId).catch(() => {});
+  try {
+    if (view === "workspace") return await handleWorkspaceCommand(userId, null);
+    if (view === "menu") return replyQuickMenu(userId);
+    if (view === "monthly") {
+      const selectedMonth = month ?? parseTelegramReportMonth("");
+      return selectedMonth
+        ? await replyQuickReport({ userId, view, workspaceType, month: selectedMonth }, month ? messageId : undefined)
+        : reply(userId, invalidMonth);
+    }
+    return await replyQuickReport({ userId, view, workspaceType });
+  } finally {
+    await acknowledged;
+  }
+}
+
 async function handleWorkspaceCallback({ queryId, userId, messageId, workspaceType }: Extract<TelegramCallback, { action: "workspace" }>) {
   const result = await setTelegramWorkspace(userId, workspaceType);
   await answerTelegramCallback(queryId).catch(() => {});
@@ -153,6 +214,7 @@ async function handleMove({ queryId, userId, messageId, transactionId, targetWor
 }
 
 async function handleCallback(callback: TelegramCallback) {
+  if (callback.action === "quick") return handleQuickCallback(callback);
   if (callback.action === "workspace") return handleWorkspaceCallback(callback);
   if (callback.action === "move") return handleMove(callback);
 
@@ -260,6 +322,9 @@ export async function POST(request: Request) {
 
     const workspaceCommand = readTelegramWorkspaceCommand(update);
     if (workspaceCommand) return await handleWorkspaceCommand(workspaceCommand.userId, workspaceCommand.workspaceType);
+
+    const quickCommand = readTelegramQuickCommand(update);
+    if (quickCommand) return await handleQuickCommand(quickCommand);
 
     const callback = readTelegramCallback(update);
     if (callback) return await handleCallback(callback);
