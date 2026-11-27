@@ -36,10 +36,25 @@ const validModelName = /^(?:(?:models|tunedModels)\/)?[A-Za-z0-9][A-Za-z0-9._-]{
 const networkTimeoutCodes = new Set(["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
 
 export class GeminiUnavailableError extends Error {
-  constructor() {
+  readonly code: string;
+
+  constructor(reason?: number | "timeout" | "network") {
     super("Layanan Gemini sedang sibuk. Coba lagi.");
     this.name = "GeminiUnavailableError";
+    this.code = typeof reason === "number" ? `GEMINI_HTTP_${reason}` :
+      reason === "timeout" ? "GEMINI_TIMEOUT" : reason === "network" ? "GEMINI_NETWORK" : "GEMINI_UNAVAILABLE";
   }
+}
+
+class GeminiRequestError extends Error {
+  constructor(message: string, readonly code: string) {
+    super(message);
+    this.name = "GeminiRequestError";
+  }
+}
+
+function invalidTransactionOutput() {
+  return new GeminiRequestError(invalidOutput, "GEMINI_TRANSACTION_OUTPUT_INVALID");
 }
 
 function configuredModels(purpose: "extraction" | "analysis") {
@@ -52,9 +67,9 @@ function configuredModels(purpose: "extraction" | "analysis") {
   const fast = cleanModel(process.env.GEMINI_MODEL_FAST);
   const primary = purpose === "analysis" ? cleanModel(process.env.GEMINI_MODEL_ANALYSIS) : fast;
   if (!apiKey || !primary) {
-    throw new Error(purpose === "analysis"
+    throw new GeminiRequestError(purpose === "analysis"
       ? "Konfigurasi analisis keuangan belum lengkap."
-      : "Konfigurasi pembacaan transaksi belum lengkap.");
+      : "Konfigurasi pembacaan transaksi belum lengkap.", "GEMINI_CONFIGURATION_INVALID");
   }
 
   const modelId = (model: string) => model.replace(/^models\//, "");
@@ -115,6 +130,7 @@ async function generateWithFallback(
   const genai = new GoogleGenAI({ apiKey, vertexai: false });
   const budget = purpose === "analysis" ? analysisBudget : extractionBudget;
   const deadline = performance.now() + budget.total;
+  let lastFailure: number | "timeout" | "network" | undefined;
 
   for (const [index, model] of candidates.entries()) {
     const remaining = Math.floor(deadline - performance.now());
@@ -126,19 +142,29 @@ async function generateWithFallback(
       return { response, modelUsed: model };
     } catch (error) {
       const reason = temporaryFailure(error);
-      if (reason === null) throw new Error("Permintaan ke Gemini tidak dapat diproses.");
+      if (reason === null) {
+        if (error instanceof ApiError && Number.isInteger(error.status)) {
+          const message = error.status === 400 && /too many states/i.test(error.message)
+            ? "Gemini menolak skema JSON karena melebihi batas kompleksitas."
+            : `Gemini menolak permintaan dengan HTTP ${error.status}.`;
+          throw new GeminiRequestError(message, `GEMINI_HTTP_${error.status}`);
+        }
+        throw new GeminiRequestError("Permintaan ke Gemini tidak dapat diproses.", "GEMINI_REQUEST_FAILED");
+      }
+      lastFailure = reason;
       console.warn("Permintaan Gemini gagal", { purpose, model, reason });
     }
   }
-  throw new GeminiUnavailableError();
+  throw new GeminiUnavailableError(lastFailure);
 }
 
-const categories = [...new Set([...INCOME_CATEGORIES, ...EXPENSE_CATEGORIES])];
 const requiredTransactionFields = {
   item: { type: "string", description: `Nama singkat transaksi dalam bahasa Indonesia, maksimal ${maxItemLength} karakter.` },
   amount: { type: "string", description: "Bilangan bulat Rupiah positif dalam digit, tanpa simbol atau pemisah." },
   type: { type: "string", enum: ["income", "expense"] },
-  category: { type: "string", enum: categories },
+  // Enums kategori dan batas array bersama-sama dapat melampaui anggaran skema Gemini.
+  // Daftar kategori ada di prompt dan kategori keluaran divalidasi sebelum penyimpanan.
+  category: { type: "string" },
   wallet_type: { type: "string", enum: WALLET_TYPES },
 };
 const fields = {
@@ -163,7 +189,7 @@ const parsingRules = [
 ].join("\n");
 
 const newTransactionRules =
-  "Pisahkan transaksi mandiri yang disebut dalam satu pesan dan beri tiap transaksi semua kolom wajib. Jangan masukkan transaksi yang belum terbukti dalam input.";
+  `Pisahkan transaksi mandiri dalam satu pesan dan beri tiap transaksi semua kolom wajib. Jangan masukkan transaksi yang belum terbukti. Maksimal ${maxTransactionsPerInput} transaksi per hasil.`;
 
 const correctionRules =
   "Koreksi hanya satu transaksi sebelumnya. Kembalikan tepat satu objek berisi kolom yang secara jelas dikoreksi. Jangan salin kolom lain. Jika jenis berubah dan kategori lama tidak cocok, pilih kategori baru dari rincian yang tersedia. Kembalikan array kosong jika tidak ada koreksi yang jelas atau nominal koreksi tidak pasti.";
@@ -190,10 +216,11 @@ function readDraft(value: Record<string, unknown>, forcedType?: TransactionType)
     !item || item.length > maxItemLength || !isAmount(amount) || !belongsTo(wallet_type, WALLET_TYPES) ||
     (type !== "income" && type !== "expense")
   ) {
-    throw new Error(invalidOutput);
+    throw invalidTransactionOutput();
   }
 
-  if (forcedType && !belongsTo(category, type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)) {
+  if ((forcedType || (typeof category === "string" && category.trim())) &&
+    !belongsTo(category, type === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES)) {
     category = "Lainnya";
   }
   if (type === "income" && belongsTo(category, INCOME_CATEGORIES)) {
@@ -202,33 +229,33 @@ function readDraft(value: Record<string, unknown>, forcedType?: TransactionType)
   if (type === "expense" && belongsTo(category, EXPENSE_CATEGORIES)) {
     return { item, amount, type, category, wallet_type };
   }
-  throw new Error(invalidOutput);
+  throw invalidTransactionOutput();
 }
 
 function readOutput(text: string | undefined, existing?: TransactionDraft, forcedType?: TransactionType): ParsedTransactionDraft[] {
   if (!text) {
-    throw new Error(invalidOutput);
+    throw invalidTransactionOutput();
   }
 
   let output: unknown;
   try {
     output = JSON.parse(text);
   } catch {
-    throw new Error(invalidOutput);
+    throw invalidTransactionOutput();
   }
   if (!Array.isArray(output) || output.length > (existing ? 1 : maxTransactionsPerInput)) {
-    throw new Error(invalidOutput);
+    throw invalidTransactionOutput();
   }
 
   const drafts: ParsedTransactionDraft[] = [];
   for (const entry of output as unknown[]) {
     if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
-      throw new Error(invalidOutput);
+      throw invalidTransactionOutput();
     }
     const change = entry as Record<string, unknown>;
     const keys = Object.keys(change);
     if (!keys.length || keys.some((key) => !Object.hasOwn(fields, key))) {
-      throw new Error(invalidOutput);
+      throw invalidTransactionOutput();
     }
     const date = isTransactionDate(change.transaction_date) ? change.transaction_date : undefined;
     if (existing && !date && keys.length === 1 && keys[0] === "transaction_date" &&
@@ -279,7 +306,6 @@ export async function parseTransactions(input: ParseInput): Promise<ParsedTransa
   const properties = forcedType ? {
     ...fields,
     type: { ...fields.type, enum: [forcedType] },
-    category: { ...fields.category, enum: forcedType === "income" ? INCOME_CATEGORIES : EXPENSE_CATEGORIES },
   } : fields;
 
   const { response } = await generateWithFallback("extraction", () => ({
@@ -289,7 +315,7 @@ export async function parseTransactions(input: ParseInput): Promise<ParsedTransa
       responseMimeType: "application/json",
       responseJsonSchema: {
         type: "array",
-        maxItems: existing ? 1 : maxTransactionsPerInput,
+        ...(existing && { maxItems: 1 }),
         items: {
           type: "object",
           properties,

@@ -24,6 +24,7 @@ import {
   type TelegramInlineKeyboard,
 } from "@/lib/telegram";
 import { redeemTelegramLink, type TelegramLinkResult } from "@/lib/telegram-link";
+import { logTelegramFailure } from "@/lib/telegram-diagnostics";
 import { getTelegramQuickReport, renderTelegramQuickReport } from "@/lib/telegram-quick-reports";
 import { parseTelegramReportMonth } from "@/lib/telegram-report-date";
 import {
@@ -276,29 +277,36 @@ async function handleInput(
   parsedText: string | undefined,
   forcedType: TransactionDraft["type"] | undefined,
 ) {
-  const limit = getDailyAiLimit();
-  const claim = await beginTelegramInput(message, limit);
-  switch (claim.status) {
-    case "duplicate":
-    case "busy": return emptyResponse();
-    case "unlinked": return reply(message.userId, connectTelegram);
-    case "workspace_unavailable": return replyWithoutHousehold(message.userId);
-    case "not_found": return reply(message.userId, missingTransaction);
-    case "rate_limited":
-      return reply(message.userId, `Kuota input AI harian Telegram tercapai (${limit}/${limit}). Catat manual lewat PWA atau coba lagi besok.`);
-  }
-
-  if (claim.status !== "ready") return emptyResponse();
+  let stage = "claim_input";
+  let claimToken: string | undefined;
 
   try {
+    const limit = getDailyAiLimit();
+    const claim = await beginTelegramInput(message, limit);
+    switch (claim.status) {
+      case "duplicate":
+      case "busy": return emptyResponse();
+      case "unlinked": return reply(message.userId, connectTelegram);
+      case "workspace_unavailable": return replyWithoutHousehold(message.userId);
+      case "not_found": return reply(message.userId, missingTransaction);
+      case "rate_limited":
+        return reply(message.userId, `Kuota input AI harian Telegram tercapai (${limit}/${limit}). Catat manual lewat PWA atau coba lagi besok.`);
+    }
+    if (claim.status !== "ready") return emptyResponse();
+    claimToken = claim.claim_token;
+
+    stage = "parse_date";
     const sentAt = new Date(message.date * 1000);
     const occurredAt = Number.isFinite(sentAt.getTime()) ? sentAt : new Date();
     const referenceDate = currentTransactionDate(occurredAt);
     const explicitDates = readExplicitTransactionDates(parsedText, referenceDate);
     let drafts: TelegramTransactionDraft[];
     try {
+      stage = "download_image";
       const image = message.photo ? await downloadTelegramImage(message.photo) : undefined;
+      stage = "gemini_extract";
       const predictions = await parseTransactions({ text: parsedText, image, existing: claim.existing, forcedType, referenceDate });
+      stage = "normalize_drafts";
       drafts = predictions.map(({ transaction_date: extractedDate, ...draft }) => {
         const explicitDate = explicitDates.find((date) => date === extractedDate) ?? explicitDates[0];
         const date = explicitDate ?? (image ? extractedDate : undefined);
@@ -311,14 +319,17 @@ async function handleInput(
       drafts = [];
     }
 
+    stage = "save_transaction";
     const result = await finishTelegramInput(
       message,
-      claim.claim_token,
+      claimToken,
       drafts,
       message.text ?? null,
       occurredAt.toISOString(),
     );
+    claimToken = undefined;
 
+    stage = "build_reply";
     switch (result.status) {
       case "saved":
       case "edited":
@@ -333,9 +344,13 @@ async function handleInput(
         return emptyResponse();
     }
   } catch (error) {
-    await releaseTelegramInput(message, claim.claim_token).catch(() => {});
+    logTelegramFailure("[telegram] input processing failed", stage, error);
+    if (claimToken) {
+      await releaseTelegramInput(message, claimToken).catch((releaseError: unknown) => {
+        logTelegramFailure("[telegram] input claim release failed", "release_claim", releaseError);
+      });
+    }
     if (error instanceof GeminiUnavailableError) return reply(message.userId, aiUnavailable);
-    console.warn("[telegram] input processing failed");
     return reply(message.userId, processingFailed);
   }
 }
@@ -354,10 +369,12 @@ export async function POST(request: Request) {
 
   let userId: number | undefined;
   let callbackId: string | undefined;
+  let stage = "dispatch";
   try {
     const command = readTelegramLinkCommand(update);
     if (command) {
       userId = command.userId;
+      stage = "link_account";
       const result = await redeemTelegramLink(
         hashTelegramLinkToken(command.token),
         command.userId,
@@ -373,12 +390,14 @@ export async function POST(request: Request) {
     const workspaceCommand = readTelegramWorkspaceCommand(update);
     if (workspaceCommand) {
       userId = workspaceCommand.userId;
+      stage = "workspace_command";
       return await handleWorkspaceCommand(workspaceCommand.userId, workspaceCommand.workspaceType);
     }
 
     const quickCommand = readTelegramQuickCommand(update);
     if (quickCommand) {
       userId = quickCommand.userId;
+      stage = "report_command";
       return await handleQuickCommand(quickCommand);
     }
 
@@ -386,12 +405,14 @@ export async function POST(request: Request) {
     if (callback) {
       userId = callback.userId;
       callbackId = callback.queryId;
+      stage = "callback";
       return await handleCallback(callback);
     }
 
     const message = readTelegramMessage(update);
     if (!message) return emptyResponse();
     userId = message.userId;
+    stage = "parse_input";
     const tagged = readTelegramWorkspaceTags(message.text);
     const input = readTelegramTransactionType(tagged.text);
     if (!message.photo && message.text?.trimStart().startsWith("/") && !input.incomeCommand) {
@@ -410,8 +431,9 @@ export async function POST(request: Request) {
       ...message,
       workspaceType: message.replyToPromptId ? undefined : tagged.workspaceType,
     }, input.text, input.forcedType);
-  } catch {
-    console.warn("[telegram] webhook handler failed");
+  } catch (error) {
+    const label = stage === "parse_input" ? "[telegram] input processing failed" : "[telegram] webhook handler failed";
+    logTelegramFailure(label, stage, error);
     if (callbackId) await answerTelegramCallback(callbackId).catch(() => {});
     return userId === undefined ? emptyResponse() : reply(userId, processingFailed);
   }

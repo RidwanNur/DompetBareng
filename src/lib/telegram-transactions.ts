@@ -1,6 +1,7 @@
 import "server-only";
 
 import { createAdminClient } from "@/lib/supabase/admin";
+import { TelegramCallError, telegramRpcError } from "@/lib/telegram-diagnostics";
 import { isUuid } from "@/lib/workspaces";
 import type { Rupiah, TransactionDraft, WorkspaceType } from "@/types/database";
 
@@ -50,12 +51,12 @@ export async function beginTelegramInput(input: TelegramInput, dailyLimit: numbe
     p_daily_limit: dailyLimit,
     p_update_id: input.updateId ?? null,
   });
-  if (error) throw new Error("Pesan Telegram belum bisa diproses.");
+  if (error) throw telegramRpcError("begin_telegram_input_in_workspace", error);
   if (data?.status === "ready" && typeof data.claim_token === "string") {
     return { status: "ready", claim_token: data.claim_token, existing: data.existing ?? undefined };
   }
   if (["unlinked", "duplicate", "busy", "rate_limited", "not_found", "workspace_unavailable"].includes(data?.status)) return data;
-  throw new Error("Status pesan Telegram tidak valid.");
+  throw new TelegramCallError("Respons klaim Telegram tidak valid.", "TELEGRAM_CLAIM_INVALID");
 }
 
 function isReceipt(value: unknown): value is TransactionReceipt {
@@ -91,13 +92,19 @@ export async function finishTelegramInput(
     p_raw_input: rawInput,
     p_occurred_at: occurredAt,
   });
+  if (error) throw telegramRpcError("finish_telegram_input", error);
   if (
-    error ||
     !["saved", "edited", "empty", "obsolete", "not_found"].includes(data?.status) ||
-    !Array.isArray(data.transactions) ||
-    !data.transactions.every(isReceipt)
+    !Array.isArray(data.transactions)
   ) {
-    throw new Error("Transaksi Telegram belum bisa disimpan.");
+    throw new TelegramCallError("Status penyimpanan Telegram tidak valid.", "TELEGRAM_SAVE_RESULT_INVALID", "validate_receipt");
+  }
+  if (!data.transactions.every(isReceipt)) {
+    const missingMetadata = data.transactions.some((entry: unknown) => typeof entry === "object" && entry !== null &&
+      (!("type" in entry) || !("occurred_at" in entry)));
+    const detail = missingMetadata ? "Respons penyimpanan kehilangan tipe atau tanggal. Periksa migrasi tanggal dan tipe transaksi."
+      : "Detail transaksi pada respons penyimpanan tidak valid.";
+    throw new TelegramCallError(detail, "TELEGRAM_RECEIPT_INVALID", "validate_receipt");
   }
   return data;
 }
@@ -157,7 +164,7 @@ export async function releaseTelegramInput(input: TelegramInput, claimToken: str
     ...inputKey(input),
     p_claim_token: claimToken,
   });
-  if (error) throw new Error("Klaim pesan Telegram belum bisa dilepas.");
+  if (error) throw telegramRpcError("release_telegram_input", error);
 }
 
 export async function getTelegramEditTarget(userId: number, transactionId: string) {

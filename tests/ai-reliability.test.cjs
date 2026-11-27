@@ -77,13 +77,15 @@ beforeEach(() => {
   rpcCalls = [];
   rpc = (_role, name) => { throw new Error(`Unexpected RPC ${name}`); };
   provider = (model) => { throw new Error(`Unexpected Gemini request ${model}`); };
-  global.fetch = async (input) => {
+  global.fetch = async (input, init) => {
     const url = new URL(input instanceof Request ? input.url : input);
     assert.equal(url.hostname, "generativelanguage.googleapis.com");
     const model = /\/models\/([^/:]+):generateContent$/.exec(url.pathname)?.[1];
     assert.ok(model);
     providerCalls.push(model);
-    const result = provider(model);
+    const body = typeof init?.body === "string" ? JSON.parse(init.body) : undefined;
+    const result = provider(model, body);
+    if (result instanceof Response) return result;
     if (typeof result === "number") {
       return Response.json({ error: { code: result, message: `Upstream ${apiKey}` } }, { status: result });
     }
@@ -302,4 +304,68 @@ test("Telegram stores an explicit income and backdate even if the provider guess
   assert.deepEqual(message.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)), [
     ["Edit", "Hapus"], ["Pindah ke Rumah Tangga", "Ubah ke Pengeluaran"],
   ]);
+});
+
+test("Telegram uses a compact Gemini schema for both ordinary expense examples", async (t) => {
+  t.mock.method(console, "info", () => {});
+  const examples = new Map([
+    ["Beli americano 24ribu", { item: "Americano", amount: "24000" }],
+    ["Belin makan bandara 25 ribu tanggal 27 november 2026", {
+      item: "Makan bandara", amount: "25000", occurred_at: "2026-11-27",
+    }],
+  ]);
+  provider = (_model, body) => {
+    const schema = body.generationConfig.responseJsonSchema;
+    if (schema.maxItems === 20 && schema.items.properties.category.enum) return 400;
+    assert.equal(schema.items.properties.transaction_date.type, "string");
+    assert.equal(schema.items.properties.category.enum, undefined);
+    const { pesan } = JSON.parse(body.contents[0].parts[0].text);
+    const example = examples.get(pesan);
+    assert.ok(example);
+    return [{ ...draft[0], item: example.item, amount: example.amount }];
+  };
+  rpc = (_role, name, args) => {
+    if (name === "begin_telegram_input_in_workspace") return { status: "ready", claim_token: claimToken };
+    assert.equal(name, "finish_telegram_input");
+    const entry = args.p_transactions[0];
+    const expected = examples.get(args.p_raw_input);
+    assert.deepEqual(entry, { ...draft[0], ...expected });
+    return { status: "saved", transactions: [{ ...entry, id: claimToken, occurred_at: expected.occurred_at
+      ? `${expected.occurred_at}T00:00:00+07:00` : args.p_occurred_at,
+      workspace_id: workspace, workspace_name: "Pribadi", workspace_type: "personal", wallet_id: account, wallet_name: "Tunai", can_move: true }] };
+  };
+  let id = 20;
+  for (const [text, expected] of examples) {
+    const response = await webhook(telegramRequest(id++, text));
+    assert.equal(response.status, 200);
+    const message = await response.json();
+    assert.match(message.text, new RegExp(`^Tercatat! ${expected.item} - -Rp`));
+    assert.deepEqual(message.reply_markup.inline_keyboard.map((row) => row.length), [2, 2]);
+    if (expected.occurred_at) assert.match(message.text, /Tanggal: 27 Nov 2026/);
+  }
+  assert.equal(providerCalls.length, 2);
+});
+
+test("Telegram logs the failure stage and provider code without leaking credentials", async (t) => {
+  const warnings = t.mock.method(console, "warn", () => {});
+  provider = () => Response.json({ error: { code: 400, status: "INVALID_ARGUMENT",
+    message: `The specified schema produces a constraint that has too many states for serving. ${apiKey}` } }, { status: 400 });
+  rpc = (_role, name) => {
+    if (name === "begin_telegram_input_in_workspace") return { status: "ready", claim_token: claimToken };
+    assert.equal(name, "release_telegram_input");
+    return null;
+  };
+  assert.equal((await webhook(telegramRequest(22, "Beli americano 24ribu"))).status, 200);
+  assert.deepEqual(warnings.mock.calls[0].arguments, ["[telegram] input processing failed", {
+    stage: "gemini_extract", errorName: "GeminiRequestError",
+    errorMessage: "Gemini menolak skema JSON karena melebihi batas kompleksitas.", errorCode: "GEMINI_HTTP_400",
+  }]);
+  assert.deepEqual(providerCalls, ["fixture-fast"]);
+
+  rpc = () => { throw Object.assign(new Error(`Backend ${apiKey} ${secret} https://example.test/?key=${apiKey}`), { code: "TRANSPORT_FAILED" }); };
+  assert.equal((await webhook(telegramRequest(23, "Beli americano 24ribu"))).status, 200);
+  const [_, detail] = warnings.mock.calls[1].arguments;
+  assert.equal(detail.stage, "claim_input");
+  assert.equal(detail.errorCode, "TRANSPORT_FAILED");
+  assert.doesNotMatch(JSON.stringify(warnings.mock.calls), new RegExp(`${apiKey}|${secret}|https://example.test`));
 });
