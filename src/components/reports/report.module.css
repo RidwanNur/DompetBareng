@@ -365,6 +365,11 @@
   list-style: disc;
 }
 
+.analysisMeta {
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
+}
+
 .actions {
   flex-wrap: wrap;
 }

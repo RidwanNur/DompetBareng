@@ -7,6 +7,7 @@ import type { Rupiah, TransactionDraft, WorkspaceType } from "@/types/database";
 type TelegramInput = {
   userId: number;
   messageId: number;
+  updateId?: number;
   replyToPromptId?: number;
   workspaceType?: WorkspaceType;
 };
@@ -37,11 +38,13 @@ function inputKey({ userId, messageId }: TelegramInput) {
   return { p_telegram_user_id: userId, p_telegram_message_id: messageId };
 }
 
-export async function beginTelegramInput(input: TelegramInput): Promise<InputClaim> {
+export async function beginTelegramInput(input: TelegramInput, dailyLimit: number): Promise<InputClaim> {
   const { data, error } = await createAdminClient().rpc("begin_telegram_input_in_workspace", {
     ...inputKey(input),
     p_reply_to_message_id: input.replyToPromptId ?? null,
     p_workspace_type: input.workspaceType ?? null,
+    p_daily_limit: dailyLimit,
+    p_update_id: input.updateId ?? null,
   });
   if (error) throw new Error("Pesan Telegram belum bisa diproses.");
   if (data?.status === "ready" && typeof data.claim_token === "string") {

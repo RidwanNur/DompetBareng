@@ -46,7 +46,8 @@
 
 .close,
 .submit,
-.secondary {
+.secondary,
+.modeSwitch {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -69,7 +70,8 @@
 }
 
 .close:hover:not(:disabled),
-.secondary:hover:not(:disabled) {
+.secondary:hover:not(:disabled),
+.modeSwitch:hover:not(:disabled) {
   color: var(--primary);
   border-color: var(--primary);
 }
@@ -87,16 +89,33 @@
 
 .close:disabled,
 .submit:disabled,
-.secondary:disabled {
+.secondary:disabled,
+.modeSwitch:disabled {
   opacity: 0.65;
   cursor: wait;
 }
 
 .form,
+.automatic:not([hidden]),
 .field {
   display: grid;
   gap: 0.625rem;
   min-inline-size: 0;
+}
+
+.automatic:not([hidden]) {
+  gap: 1.125rem;
+}
+
+.manualFields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.modeSwitch {
+  justify-self: start;
+  color: var(--primary);
 }
 
 .field {
@@ -104,15 +123,22 @@
   font-weight: 600;
 }
 
-.field textarea {
+.field textarea,
+.field input,
+.field select {
   inline-size: 100%;
-  min-block-size: 6rem;
+  min-inline-size: 0;
+  min-block-size: 2.75rem;
   padding: 0.625rem 0.75rem;
   border: 1px solid var(--border);
   border-radius: 0.625rem;
   background: var(--page);
   font-size: 1rem;
   font-weight: 400;
+}
+
+.field textarea {
+  min-block-size: 6rem;
   resize: vertical;
 }
 
@@ -158,4 +184,8 @@
 
 .error {
   color: var(--negative);
+}
+
+@media (max-width: 30rem) {
+  .manualFields { grid-template-columns: minmax(0, 1fr); }
 }

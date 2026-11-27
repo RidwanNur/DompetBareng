@@ -82,6 +82,7 @@ async function receiveReceipt(request, appOrigin) {
     });
     if (response.ok) return redirectToShareResult(appOrigin, "success");
     if (response.status === 401) return redirectToShareResult(appOrigin, "login");
+    if (response.status === 429) return redirectToShareResult(appOrigin, "limited");
     if ([400, 413, 415, 422].includes(response.status)) {
       return redirectToShareResult(appOrigin, "invalid");
     }

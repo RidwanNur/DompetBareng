@@ -1,6 +1,6 @@
 import "server-only";
 
-import { GoogleGenAI, ThinkingLevel, type Part } from "@google/genai";
+import { ApiError, GoogleGenAI, ThinkingLevel, type GenerateContentParameters, type Part } from "@google/genai";
 import {
   EXPENSE_CATEGORIES,
   INCOME_CATEGORIES,
@@ -24,6 +24,109 @@ const bigintMax = "9223372036854775807";
 const maxItemLength = 120;
 const maxTransactionsPerInput = 20;
 const invalidOutput = "Hasil pembacaan transaksi tidak valid.";
+
+const extractionBudget = { total: 4_100, reserve: 1_000, minimum: 300 };
+const analysisBudget = { total: 46_000, reserve: 16_000, minimum: 3_000 };
+const validModelName = /^(?:(?:models|tunedModels)\/)?[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+const networkTimeoutCodes = new Set(["ETIMEDOUT", "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"]);
+
+export class GeminiUnavailableError extends Error {
+  constructor() {
+    super("Layanan Gemini sedang sibuk. Coba lagi.");
+    this.name = "GeminiUnavailableError";
+  }
+}
+
+function configuredModels(purpose: "extraction" | "analysis") {
+  const apiKey = process.env.GEMINI_API_KEY?.trim();
+  const cleanModel = (value: string | undefined) => {
+    const model = value?.trim();
+    return model && validModelName.test(model) && !model.includes("..") && (!apiKey || !model.includes(apiKey))
+      ? model : undefined;
+  };
+  const fast = cleanModel(process.env.GEMINI_MODEL_FAST);
+  const primary = purpose === "analysis" ? cleanModel(process.env.GEMINI_MODEL_ANALYSIS) : fast;
+  if (!apiKey || !primary) {
+    throw new Error(purpose === "analysis"
+      ? "Konfigurasi analisis keuangan belum lengkap."
+      : "Konfigurasi pembacaan transaksi belum lengkap.");
+  }
+
+  const modelId = (model: string) => model.replace(/^models\//, "");
+  const candidates = [primary];
+  const seen = new Set([modelId(primary)]);
+  for (const value of process.env.GEMINI_MODEL_FALLBACKS?.split(",") ?? []) {
+    const model = cleanModel(value);
+    if (!model) continue;
+    const id = modelId(model);
+    if (seen.has(id) || (purpose === "analysis" && fast && id === modelId(fast))) continue;
+    candidates.push(model);
+    seen.add(id);
+  }
+  if (purpose === "analysis" && fast && !seen.has(modelId(fast))) candidates.push(fast);
+  return { apiKey, candidates };
+}
+
+function temporaryFailure(error: unknown) {
+  if (error instanceof ApiError) {
+    if (error.status === 408 || error.status === 504) return "timeout";
+    if (error.status === 429 || error.status === 500 || error.status === 503) return error.status;
+  }
+  if (error instanceof Error) {
+    if (error.name === "AbortError" || error.name === "TimeoutError") return "timeout";
+    const cause = error.cause;
+    if (typeof cause === "object" && cause !== null && "code" in cause &&
+      typeof cause.code === "string" && networkTimeoutCodes.has(cause.code)) return "timeout";
+  }
+  if (error instanceof TypeError) return "network";
+  return null;
+}
+
+async function generateBeforeTimeout(genai: GoogleGenAI, request: GenerateContentParameters, timeout: number) {
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      reject(new DOMException("Waktu permintaan Gemini habis.", "TimeoutError"));
+      controller.abort();
+    }, timeout);
+  });
+  try {
+    return await Promise.race([
+      genai.models.generateContent({ ...request, config: { ...request.config, abortSignal: controller.signal } }),
+      deadline,
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function generateWithFallback(
+  purpose: "extraction" | "analysis",
+  prepare: (model: string) => Omit<GenerateContentParameters, "model">,
+) {
+  const { apiKey, candidates } = configuredModels(purpose);
+  // Preserve ApiError.status from the SDK's single fetch for model selection.
+  const genai = new GoogleGenAI({ apiKey, vertexai: false });
+  const budget = purpose === "analysis" ? analysisBudget : extractionBudget;
+  const deadline = performance.now() + budget.total;
+
+  for (const [index, model] of candidates.entries()) {
+    const remaining = Math.floor(deadline - performance.now());
+    if (remaining < budget.minimum) break;
+    const reserve = index < candidates.length - 1 ? Math.min(budget.reserve, Math.floor(remaining / 2)) : 0;
+    try {
+      const response = await generateBeforeTimeout(genai, { ...prepare(model), model }, remaining - reserve);
+      console.info("Gemini selesai", { purpose, model });
+      return { response, modelUsed: model };
+    } catch (error) {
+      const reason = temporaryFailure(error);
+      if (reason === null) throw new Error("Permintaan ke Gemini tidak dapat diproses.");
+      console.warn("Permintaan Gemini gagal", { purpose, model, reason });
+    }
+  }
+  throw new GeminiUnavailableError();
+}
 
 const fields = {
   item: { type: "string", description: `Nama singkat transaksi dalam bahasa Indonesia, maksimal ${maxItemLength} karakter.` },
@@ -135,25 +238,13 @@ export async function parseTransactions(input: ParseInput): Promise<TransactionD
     return [];
   }
 
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  const model = process.env.GEMINI_MODEL_FAST?.trim();
-  if (!apiKey || !model) {
-    throw new Error("Konfigurasi pembacaan transaksi belum lengkap.");
-  }
-
   const existing = input.existing && readDraft(input.existing);
   const parts: Part[] = [{ text: JSON.stringify({ pesan: text, transaksi_sebelumnya: existing }) }];
   if (image) {
     parts.push({ inlineData: { data: image.data, mimeType: image.mimeType } });
   }
 
-  const genai = new GoogleGenAI({
-    apiKey,
-    vertexai: false,
-    httpOptions: { timeout: 15_000, retryOptions: { attempts: 1 } },
-  });
-  const response = await genai.models.generateContent({
-    model,
+  const { response } = await generateWithFallback("extraction", () => ({
     contents: [{ role: "user", parts }],
     config: {
       systemInstruction: `${parsingRules}\n${existing ? correctionRules : newTransactionRules}`,
@@ -169,7 +260,7 @@ export async function parseTransactions(input: ParseInput): Promise<TransactionD
         },
       },
     },
-  });
+  }));
 
   return readOutput(response.text, existing);
 }
@@ -211,19 +302,7 @@ export function readMonthlyAnalysis(value: unknown): MonthlyAnalysis {
   return { narrative, suggestions };
 }
 
-export async function generateMonthlyAnalysis(report: MonthlyReport): Promise<MonthlyAnalysis> {
-  const apiKey = process.env.GEMINI_API_KEY?.trim();
-  const model = process.env.GEMINI_MODEL_ANALYSIS?.trim();
-  if (!apiKey || !model) {
-    throw new Error("Konfigurasi analisis keuangan belum lengkap.");
-  }
-  const modelMajor = Number(/(?:^|\/)gemini-(\d+)/i.exec(model)?.[1]);
-
-  const genai = new GoogleGenAI({
-    apiKey,
-    vertexai: false,
-    httpOptions: { timeout: 45_000, retryOptions: { attempts: 2 } },
-  });
+export async function generateMonthlyAnalysis(report: MonthlyReport): Promise<{ analysis: MonthlyAnalysis; modelUsed: string }> {
   const { largest_expense: largestExpense } = report;
   const aggregates = {
     transaction_count: report.transaction_count,
@@ -235,12 +314,12 @@ export async function generateMonthlyAnalysis(report: MonthlyReport): Promise<Mo
     largest_expense: largestExpense && { category: largestExpense.category, total: largestExpense.total },
     category_totals: report.category_totals.map(({ type, category, total }) => ({ type, category, total })),
   };
-  const response = await genai.models.generateContent({
-    model,
+  const { response, modelUsed } = await generateWithFallback("analysis", (model) => ({
     contents: [{ role: "user", parts: [{ text: JSON.stringify(aggregates) }] }],
     config: {
       systemInstruction: analysisRules,
-      ...(modelMajor >= 3 ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
+      ...((Number(/(?:^|\/)gemini-(\d+)/i.exec(model)?.[1]) >= 3)
+        ? { thinkingConfig: { thinkingLevel: ThinkingLevel.LOW } } : {}),
       responseMimeType: "application/json",
       responseJsonSchema: {
         type: "object",
@@ -255,7 +334,7 @@ export async function generateMonthlyAnalysis(report: MonthlyReport): Promise<Mo
         required: ["narrative", "suggestions"],
       },
     },
-  });
+  }));
 
   let analysis: unknown;
   try {
@@ -263,5 +342,5 @@ export async function generateMonthlyAnalysis(report: MonthlyReport): Promise<Mo
   } catch {
     throw new Error(invalidAnalysis);
   }
-  return readMonthlyAnalysis(analysis);
+  return { analysis: readMonthlyAnalysis(analysis), modelUsed };
 }

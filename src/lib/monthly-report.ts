@@ -1,6 +1,7 @@
 import "server-only";
 
 import { getAppOrigin, getCurrentUser, isSupabaseConfigured } from "@/lib/auth";
+import { buildFinancialHealthFallback, withFinancialHealthFallback } from "@/lib/financial-health";
 import { generateMonthlyAnalysis, readMonthlyAnalysis } from "@/lib/gemini";
 import { createAdminClient } from "@/lib/supabase/admin";
 import { createClient } from "@/lib/supabase/server";
@@ -14,6 +15,7 @@ class ReportError extends Error {
 }
 
 type ReportClient = Awaited<ReturnType<typeof createClient>>;
+type AnalysisResponse = { report: MonthlyReport; busy?: true; limited?: true };
 
 const unavailable = "Laporan bulanan belum dapat diproses. Coba lagi.";
 const unavailableAnalysis = "Ringkasan AI belum dapat dibuat. Coba lagi.";
@@ -28,7 +30,7 @@ export function getCurrentJakartaMonth(now = new Date()) {
   return `${year}-${month}`;
 }
 
-export function monthlyReportResponse(body: { report: MonthlyReport; busy?: true } | { error: string }, status = 200) {
+export function monthlyReportResponse(body: AnalysisResponse | { error: string }, status = 200) {
   return Response.json(body, { status, headers: { "Cache-Control": "private, no-store" } });
 }
 
@@ -87,13 +89,20 @@ function readWallet(value: unknown): MonthlyReport["wallet_balances"][number] {
   return { wallet_id: value.wallet_id, wallet_name: value.wallet_name, balance: readMoney(value.balance, true) };
 }
 
+function readTimestamp(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value !== "string" || !Number.isFinite(Date.parse(value))) throw new ReportError(503, unavailable);
+  return value;
+}
+
 function readReport(value: unknown, target: ReturnType<typeof reportTarget>): MonthlyReport {
   if (value === null) throw new ReportError(403, denied);
   if (!isRecord(value) || value.workspace_id !== target.p_workspace_id || value.month !== target.p_month) {
     throw new ReportError(503, unavailable);
   }
 
-  const { transaction_count, expense_ratio_percent, health_status, category_totals, wallet_balances, analysis_stale } = value;
+  const { transaction_count, expense_ratio_percent, health_status, category_totals, wallet_balances, analysis_stale,
+    analysis_source, analysis_fingerprint } = value;
   if (
     typeof transaction_count !== "number" || !Number.isSafeInteger(transaction_count) || transaction_count < 0 ||
     (expense_ratio_percent !== null && (
@@ -101,7 +110,9 @@ function readReport(value: unknown, target: ReturnType<typeof reportTarget>): Mo
       !/^(?:0|[1-9][0-9]*)(?:\.[0-9]+)?$/.test(expense_ratio_percent)
     )) ||
     (health_status !== "Sehat" && health_status !== "Waspada" && health_status !== "Defisit" && health_status !== "Belum Ada Data") ||
-    !Array.isArray(category_totals) || !Array.isArray(wallet_balances) || typeof analysis_stale !== "boolean"
+    !Array.isArray(category_totals) || !Array.isArray(wallet_balances) || typeof analysis_stale !== "boolean" ||
+    (analysis_source != null && analysis_source !== "ai" && analysis_source !== "fallback") ||
+    (analysis_fingerprint != null && (typeof analysis_fingerprint !== "string" || !/^[a-f0-9]{64}$/.test(analysis_fingerprint)))
   ) {
     throw new ReportError(503, unavailable);
   }
@@ -120,6 +131,10 @@ function readReport(value: unknown, target: ReturnType<typeof reportTarget>): Mo
     wallet_balances: wallet_balances.map(readWallet),
     analysis: value.analysis === null ? null : readMonthlyAnalysis(value.analysis),
     analysis_stale,
+    analysis_source: analysis_source ?? (value.analysis === null ? null : "ai"),
+    analysis_fingerprint: analysis_fingerprint ?? null,
+    analysis_updated_at: readTimestamp(value.analysis_updated_at),
+    analysis_retry_at: readTimestamp(value.analysis_retry_at),
   };
 }
 
@@ -223,22 +238,22 @@ async function readAnalysisRequest(request: Request) {
   return { target: reportTarget(body.workspace_id, body.month), manual: body.manual };
 }
 
-export async function requestMonthlyAnalysis(request: Request): Promise<{ report: MonthlyReport; busy?: true }> {
+export async function requestMonthlyAnalysis(request: Request): Promise<AnalysisResponse> {
   const { target, manual } = await readAnalysisRequest(request);
   const supabase = await createClient();
   const { data: claim, error } = await supabase.rpc("begin_monthly_analysis", { ...target, p_manual: manual });
-  if (error || !isRecord(claim)) throw new ReportError(503, unavailableAnalysis);
+  if (error || !isRecord(claim)) return { report: withFinancialHealthFallback(await queryReport(supabase, target)) };
+  if (claim.status === "forbidden") throw new ReportError(403, denied);
+  const report = claim.report === undefined ? await queryReport(supabase, target) : readReport(claim.report, target);
 
   switch (claim.status) {
-    case "forbidden":
-      throw new ReportError(403, denied);
     case "rate_limited":
-      throw new ReportError(429, "Batas pembaruan ringkasan AI hari ini sudah tercapai.");
+      return { report: withFinancialHealthFallback(report), limited: true };
     case "cached":
     case "empty":
-      return { report: await queryReport(supabase, target) };
+      return { report };
     case "busy":
-      return { report: await queryReport(supabase, target), busy: true };
+      return { report: withFinancialHealthFallback(report), busy: true };
     case "ready":
       break;
     default:
@@ -247,24 +262,24 @@ export async function requestMonthlyAnalysis(request: Request): Promise<{ report
   if (!isUuid(claim.claim_token)) throw new ReportError(503, unavailableAnalysis);
 
   const args = { ...target, p_claim_token: claim.claim_token };
-  const admin = createAdminClient();
   let finished = false;
+  let admin: ReturnType<typeof createAdminClient> | undefined;
   try {
-    const report = readReport(claim.report, target);
     if (!report.transaction_count || (report.total_income === "0" && report.total_expense === "0")) {
       return { report };
     }
 
-    const analysis = await generateMonthlyAnalysis(report);
-    const completed = await admin.rpc("complete_monthly_analysis", { ...args, p_analysis: analysis });
-    if (completed.error || completed.data !== true) {
-      throw new ReportError(503, unavailableAnalysis);
-    }
-    finished = true;
+    admin = createAdminClient();
+    const generated = await generateMonthlyAnalysis(report).catch(() => null);
+    const completed = await admin.rpc("complete_monthly_analysis", {
+      ...args, p_analysis: generated?.analysis ?? buildFinancialHealthFallback(report),
+      p_source: generated ? "ai" : "fallback", p_model_used: generated?.modelUsed ?? null,
+    });
+    finished = !completed.error && completed.data === true;
   } catch {
-    throw new ReportError(503, unavailableAnalysis);
+    console.warn("[ai-health] analysis publication failed");
   } finally {
-    if (!finished) {
+    if (!finished && admin) {
       try {
         await admin.rpc("release_monthly_analysis", args);
       } catch {
@@ -273,5 +288,6 @@ export async function requestMonthlyAnalysis(request: Request): Promise<{ report
     }
   }
 
-  return { report: await queryReport(supabase, target) };
+  const updated = await queryReport(supabase, target).catch(() => report);
+  return { report: withFinancialHealthFallback(updated) };
 }

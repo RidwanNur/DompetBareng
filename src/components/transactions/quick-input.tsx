@@ -3,16 +3,19 @@
 import { Camera, ScanLine, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
+import { ManualInput, type ManualTransactionInput } from "./manual-input";
 import { prepareReceipt } from "./prepare-receipt";
 import styles from "./quick-input.module.css";
 
 type InputAttempt = { workspaceId: string; id: string; input: string | File };
-export type ShareResult = "success" | "invalid" | "failed";
+type EntryInput = { text: string } | { manual: ManualTransactionInput } | File;
+export type ShareResult = "success" | "invalid" | "failed" | "limited";
 
 const savedMessage = "Transaksi berhasil disimpan";
 const shareErrors: Record<Exclude<ShareResult, "success">, string> = {
   invalid: "Foto struk belum bisa diproses. Pilih foto yang jelas lewat + Catat.",
   failed: "Foto struk belum bisa disimpan. Coba bagikan ulang.",
+  limited: "Batas penggunaan AI harian tercapai. Catat Manual lewat + Catat.",
 };
 
 export function QuickInput({
@@ -33,9 +36,12 @@ export function QuickInput({
   const attempt = useRef<InputAttempt | null>(null);
   const inFlight = useRef(false);
   const [space, setSpace] = useState({ id: workspaceId, name: workspaceName });
+  const [isOpen, setIsOpen] = useState(false);
   const [text, setText] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
+  const [manual, setManual] = useState(shared === "limited");
+  const [quotaBlocked, setQuotaBlocked] = useState(false);
   const [receipt, setReceipt] = useState<File | null>(null);
   const [notice, setNotice] = useState(shared === "success" ? savedMessage : shared ? shareErrors[shared] : "");
   const [saved, setSaved] = useState(shared === "success");
@@ -52,6 +58,13 @@ export function QuickInput({
     setError("");
     setNotice("");
     dialog.current?.showModal();
+    setIsOpen(true);
+  }
+
+  function switchMode() {
+    setManual((current) => !current);
+    setError("");
+    clearReceipt();
   }
 
   function clearReceipt() {
@@ -60,21 +73,23 @@ export function QuickInput({
     if (camera.current) camera.current.value = "";
   }
 
-  async function save(input: string | File) {
+  async function save(input: EntryInput) {
     if (inFlight.current) return;
     inFlight.current = true;
     setPending(true);
     setError("");
+    setQuotaBlocked(false);
     try {
       const previous = attempt.current;
-      const id = previous?.input === input && previous.workspaceId === space.id ? previous.id : crypto.randomUUID();
-      attempt.current = { workspaceId: space.id, id, input };
+      const signature = input instanceof File ? input : JSON.stringify(input);
+      const id = previous?.input === signature && previous.workspaceId === space.id ? previous.id : crypto.randomUUID();
+      attempt.current = { workspaceId: space.id, id, input: signature };
 
       let options: RequestInit;
-      if (typeof input === "string") {
+      if (!(input instanceof File)) {
         options = {
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ text: input, workspace_id: space.id, input_id: id }),
+          body: JSON.stringify({ ...input, workspace_id: space.id, input_id: id }),
         };
       } else {
         const image = await prepareReceipt(input).catch(() => null);
@@ -92,6 +107,7 @@ export function QuickInput({
       const response = await fetch("/api/transactions", { ...options, method: "POST" });
       const result = await response.json().catch(() => null);
       if (!response.ok || !Number.isSafeInteger(result?.count) || result.count < 1) {
+        setQuotaBlocked(response.status === 429);
         setError(typeof result?.error === "string" ? result.error : "Transaksi belum bisa disimpan. Coba lagi.");
         return;
       }
@@ -119,7 +135,7 @@ export function QuickInput({
       return;
     }
     clearReceipt();
-    void save(cleanText);
+    void save({ text: cleanText });
   }
 
   function handlePhoto(event: ChangeEvent<HTMLInputElement>) {
@@ -144,6 +160,7 @@ export function QuickInput({
         aria-labelledby="quick-input-title"
         onCancel={(event) => { if (inFlight.current) event.preventDefault(); }}
         onClose={() => {
+          setIsOpen(false);
           clearReceipt();
           if (attempt.current && typeof attempt.current.input !== "string") attempt.current = null;
         }}
@@ -157,38 +174,46 @@ export function QuickInput({
             <X size={22} aria-hidden="true" />
           </button>
         </div>
-        <form className={styles.form} onSubmit={submitText} aria-busy={pending}>
-          <label className={styles.field}>
-            Teks transaksi
-            <textarea
-              name="text"
-              placeholder="Contoh: belanja sayur 45rb cash, kopi 25rb qris"
-              maxLength={4000}
-              rows={3}
-              value={text}
-              onChange={(event) => setText(event.target.value)}
-              disabled={pending}
-            />
-          </label>
-          <button className={styles.submit} type="submit" disabled={pending}>Catat Sekarang</button>
-        </form>
-        <div className={styles.photos}>
-          <input id="receipt-upload-input" ref={gallery} type="file" accept="image/*" hidden onChange={handlePhoto} disabled={pending} />
-          <input id="receipt-camera-input" ref={camera} type="file" accept="image/*" capture="environment" hidden onChange={handlePhoto} disabled={pending} />
-          <button className={styles.secondary} type="button" onClick={() => gallery.current?.click()} disabled={pending}>
-            <ScanLine aria-hidden="true" size={19} /> Scan Struk / QRIS
-          </button>
-          <button className={styles.secondary} type="button" onClick={() => camera.current?.click()} disabled={pending}>
-            <Camera aria-hidden="true" size={19} /> Ambil Foto
-          </button>
+        {isOpen && manual && (
+          <ManualInput key={space.id} workspaceId={space.id} pending={pending} onSave={(input) => void save({ manual: input })} />
+        )}
+        <div className={styles.automatic} hidden={manual}>
+          <form className={styles.form} onSubmit={submitText} aria-busy={pending}>
+            <label className={styles.field}>
+              Teks transaksi
+              <textarea
+                name="text"
+                placeholder="Contoh: belanja sayur 45rb cash, kopi 25rb qris"
+                maxLength={4000}
+                rows={3}
+                value={text}
+                onChange={(event) => setText(event.target.value)}
+                disabled={pending}
+              />
+            </label>
+            <button className={styles.submit} type="submit" disabled={pending}>Catat Sekarang</button>
+          </form>
+          <div className={styles.photos}>
+            <input id="receipt-upload-input" ref={gallery} type="file" accept="image/*" hidden onChange={handlePhoto} disabled={pending} />
+            <input id="receipt-camera-input" ref={camera} type="file" accept="image/*" capture="environment" hidden onChange={handlePhoto} disabled={pending} />
+            <button className={styles.secondary} type="button" onClick={() => gallery.current?.click()} disabled={pending}>
+              <ScanLine aria-hidden="true" size={19} /> Scan Struk / QRIS
+            </button>
+            <button className={styles.secondary} type="button" onClick={() => camera.current?.click()} disabled={pending}>
+              <Camera aria-hidden="true" size={19} /> Ambil Foto
+            </button>
+          </div>
         </div>
         {pending && <p className={styles.progress} role="status">Memproses transaksi…</p>}
         {error && (
           <div className={styles.failure}>
             <p className={styles.error} role="alert">{error}</p>
-            {receipt && <button type="button" className={styles.secondary} onClick={() => void save(receipt)} disabled={pending}>Coba Lagi</button>}
+            {receipt && !quotaBlocked && <button type="button" className={styles.secondary} onClick={() => void save(receipt)} disabled={pending}>Coba Lagi</button>}
           </div>
         )}
+        <button type="button" className={styles.modeSwitch} onClick={switchMode} disabled={pending}>
+          {manual ? "Gunakan Teks atau Foto" : "Catat Manual"}
+        </button>
       </dialog>
     </div>
   );

@@ -154,6 +154,10 @@ export interface MonthlyReport {
   wallet_balances: { wallet_id: string; wallet_name: string; balance: Rupiah }[];
   analysis: MonthlyAnalysis | null;
   analysis_stale: boolean;
+  analysis_source: "ai" | "fallback" | null;
+  analysis_fingerprint: string | null;
+  analysis_updated_at: string | null;
+  analysis_retry_at: string | null;
 }
 
 export interface MonthlyReportDetails {

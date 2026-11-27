@@ -229,8 +229,10 @@ export function readTelegramMessage(update: unknown) {
       ? message.caption
       : undefined;
   const replyToPromptId = editPromptId(message.reply_to_message);
+  const updateId = isRecord(update) && typeof update.update_id === "number" &&
+    Number.isSafeInteger(update.update_id) && update.update_id >= 0 ? update.update_id : undefined;
 
-  return text?.trim() || photo ? { userId, messageId, date, text, photo, replyToPromptId } : null;
+  return text?.trim() || photo ? { userId, messageId, updateId, date, text, photo, replyToPromptId } : null;
 }
 
 const transactionIdPattern =

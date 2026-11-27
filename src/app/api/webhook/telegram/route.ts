@@ -1,5 +1,6 @@
+import { getDailyAiLimit } from "@/lib/ai-quota";
 import { formatRupiah } from "@/lib/format";
-import { parseTransactions } from "@/lib/gemini";
+import { GeminiUnavailableError, parseTransactions } from "@/lib/gemini";
 import {
   answerTelegramCallback,
   downloadTelegramImage,
@@ -67,9 +68,11 @@ const quickMenu: TelegramInlineKeyboard = [
   [{ text: "Ganti Ruang", callback_data: "quick:workspace" }],
 ];
 const invalidMonth = "Format bulan belum valid. Coba /laporan bulan lalu, /laporan nov 2026, /laporan 10/2026, atau /laporan 2026-10.";
+const aiUnavailable = "Layanan AI sedang sibuk sementara. Silakan kirim ulang pesan ini beberapa saat lagi atau catat lewat PWA.";
+const processingFailed = "Permintaan belum dapat diproses. Periksa riwayat sebelum mencoba lagi.";
 
-function emptyResponse(status = 200) {
-  return new Response(null, { status, headers });
+function emptyResponse() {
+  return new Response(null, { headers });
 }
 
 function reply(userId: number, text: string, keyboard?: TelegramInlineKeyboard) {
@@ -243,18 +246,19 @@ async function handleCallback(callback: TelegramCallback) {
 }
 
 async function handleInput(message: TelegramMessage & { workspaceType?: WorkspaceType }, parsedText: string | undefined) {
-  const claim = await beginTelegramInput(message);
+  const limit = getDailyAiLimit();
+  const claim = await beginTelegramInput(message, limit);
   switch (claim.status) {
-    case "duplicate": return emptyResponse();
-    case "busy": return emptyResponse(503);
+    case "duplicate":
+    case "busy": return emptyResponse();
     case "unlinked": return reply(message.userId, connectTelegram);
     case "workspace_unavailable": return replyWithoutHousehold(message.userId);
     case "not_found": return reply(message.userId, missingTransaction);
     case "rate_limited":
-      return reply(message.userId, "Kuota harian Telegram habis. Catat lewat PWA atau coba lagi besok.");
+      return reply(message.userId, `Kuota input AI harian Telegram tercapai (${limit}/${limit}). Catat manual lewat PWA atau coba lagi besok.`);
   }
 
-  if (claim.status !== "ready") return emptyResponse(503);
+  if (claim.status !== "ready") return emptyResponse();
 
   try {
     let drafts: TransactionDraft[];
@@ -285,29 +289,34 @@ async function handleInput(message: TelegramMessage & { workspaceType?: Workspac
       case "not_found":
         return reply(message.userId, missingTransaction);
       case "obsolete":
-        return emptyResponse(503);
+        return emptyResponse();
     }
-  } catch {
+  } catch (error) {
     await releaseTelegramInput(message, claim.claim_token).catch(() => {});
-    return emptyResponse(503);
+    if (error instanceof GeminiUnavailableError) return reply(message.userId, aiUnavailable);
+    console.warn("[telegram] input processing failed");
+    return reply(message.userId, processingFailed);
   }
 }
 
 export async function POST(request: Request) {
   if (!verifyTelegramWebhook(request.headers)) {
-    return emptyResponse(401);
+    return new Response(null, { status: 401, headers });
   }
 
   let update: unknown;
   try {
     update = await request.json();
   } catch {
-    return emptyResponse(400);
+    return emptyResponse();
   }
 
+  let userId: number | undefined;
+  let callbackId: string | undefined;
   try {
     const command = readTelegramLinkCommand(update);
     if (command) {
+      userId = command.userId;
       const result = await redeemTelegramLink(
         hashTelegramLinkToken(command.token),
         command.userId,
@@ -321,16 +330,27 @@ export async function POST(request: Request) {
     }
 
     const workspaceCommand = readTelegramWorkspaceCommand(update);
-    if (workspaceCommand) return await handleWorkspaceCommand(workspaceCommand.userId, workspaceCommand.workspaceType);
+    if (workspaceCommand) {
+      userId = workspaceCommand.userId;
+      return await handleWorkspaceCommand(workspaceCommand.userId, workspaceCommand.workspaceType);
+    }
 
     const quickCommand = readTelegramQuickCommand(update);
-    if (quickCommand) return await handleQuickCommand(quickCommand);
+    if (quickCommand) {
+      userId = quickCommand.userId;
+      return await handleQuickCommand(quickCommand);
+    }
 
     const callback = readTelegramCallback(update);
-    if (callback) return await handleCallback(callback);
+    if (callback) {
+      userId = callback.userId;
+      callbackId = callback.queryId;
+      return await handleCallback(callback);
+    }
 
     const message = readTelegramMessage(update);
     if (!message) return emptyResponse();
+    userId = message.userId;
     if (!message.photo && message.text?.startsWith("/")) {
       return message.text === "/start"
         ? reply(message.userId, `Kirim teks transaksi atau foto struk/QRIS. ${connectTelegram}`)
@@ -348,6 +368,8 @@ export async function POST(request: Request) {
       workspaceType: message.replyToPromptId ? undefined : tagged.workspaceType,
     }, tagged.text);
   } catch {
-    return emptyResponse(503);
+    console.warn("[telegram] webhook handler failed");
+    if (callbackId) await answerTelegramCallback(callbackId).catch(() => {});
+    return userId === undefined ? emptyResponse() : reply(userId, processingFailed);
   }
 }

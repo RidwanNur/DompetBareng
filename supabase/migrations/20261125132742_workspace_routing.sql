@@ -535,7 +535,7 @@ begin
   insert into app_private.telegram_input_daily_usage as usage (user_id, usage_date, input_count)
   values (account_id, (claimed_at at time zone 'Asia/Jakarta')::date, 1)
   on conflict (user_id, usage_date) do update set input_count = usage.input_count + 1
-  where usage.input_count < 30;
+  where usage.input_count < 50;
   if not found then
     perform app_private.complete_telegram_input(p_telegram_user_id, p_telegram_message_id);
     return jsonb_build_object('status', 'rate_limited');

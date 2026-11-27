@@ -16,6 +16,7 @@ export async function POST(request: Request) {
   } catch (error) {
     if (error instanceof PwaInputError) {
       if (error.status === 401) return sharedRedirect("/login?shared=login");
+      if (error.status === 429) return sharedRedirect("/?shared=limited");
       if (error.status === 409 || error.status >= 500) return sharedRedirect("/?shared=failed");
       return sharedRedirect("/?shared=invalid");
     }

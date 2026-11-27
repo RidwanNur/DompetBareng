@@ -20,7 +20,7 @@ export default async function HomePage({ searchParams }: { searchParams: Promise
   if (!(await getCurrentUser())) redirect("/login");
 
   const [dashboard, { shared }] = await Promise.all([getDashboardData().catch(() => null), searchParams]);
-  const shareResult = shared === "success" || shared === "invalid" || shared === "failed" ? shared : undefined;
+  const shareResult = shared === "success" || shared === "invalid" || shared === "failed" || shared === "limited" ? shared : undefined;
 
   return (
     <main className="app-main">
