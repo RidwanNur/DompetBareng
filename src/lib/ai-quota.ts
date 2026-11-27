@@ -4,7 +4,7 @@ export function getDailyAiLimit() {
     const limit = Number(configured);
     if (Number.isSafeInteger(limit) && limit <= 2_147_483_647) return limit;
   }
-  return 80;
+  return 60;
 }
 
 export function aiQuotaMessage(limit: number) {

@@ -11,6 +11,7 @@ import {
   readTelegramLinkCommand,
   readTelegramMessage,
   readTelegramQuickCommand,
+  readTelegramTransactionType,
   readTelegramWorkspaceCommand,
   readTelegramWorkspaceTags,
   sendTelegramMessage,
@@ -29,6 +30,7 @@ import {
   beginTelegramInput,
   deleteTelegramTransaction,
   finishTelegramInput,
+  flipTelegramTransaction,
   getTelegramEditTarget,
   getTelegramTransactionReceipts,
   getTelegramWorkspaceState,
@@ -36,7 +38,9 @@ import {
   saveTelegramEditPrompt,
   setTelegramWorkspace,
   type TransactionReceipt,
+  type TelegramTransactionDraft,
 } from "@/lib/telegram-transactions";
+import { currentTransactionDate, readExplicitTransactionDates, stripTransactionDates } from "@/lib/transaction-date";
 import { moveTransaction } from "@/lib/transaction-move";
 import type { TransactionDraft, WorkspaceType } from "@/types/database";
 
@@ -70,6 +74,8 @@ const quickMenu: TelegramInlineKeyboard = [
 const invalidMonth = "Format bulan belum valid. Coba /laporan bulan lalu, /laporan nov 2026, /laporan 10/2026, atau /laporan 2026-10.";
 const aiUnavailable = "Layanan AI sedang sibuk sementara. Silakan kirim ulang pesan ini beberapa saat lagi atau catat lewat PWA.";
 const processingFailed = "Permintaan belum dapat diproses. Periksa riwayat sebelum mencoba lagi.";
+const transactionTypeLabels = { income: "Pemasukan", expense: "Pengeluaran" };
+const receiptDate = new Intl.DateTimeFormat("id-ID", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Jakarta" });
 
 function emptyResponse() {
   return new Response(null, { headers });
@@ -90,24 +96,30 @@ function displayText(value: string, limit: number) {
 }
 
 function transactionMessage(transactions: TransactionReceipt[]) {
-  const lineBudget = Math.floor((4096 - Math.max(0, transactions.length - 1)) / Math.max(1, transactions.length));
+  const lineBudget = Math.floor((4096 - Math.max(0, transactions.length - 1) * 2) / Math.max(1, transactions.length));
   const lines = transactions.map((entry) => {
     const item = entry.item.replace(/\s+/g, " ").trim();
     const wallet = entry.wallet_name.replace(/\s+/g, " ").trim();
-    const nominal = formatRupiah(entry.amount).replace(/\s/g, "");
+    const sign = entry.type === "income" ? "+" : "-";
+    const nominal = sign + formatRupiah(entry.amount).replace(/\s/g, "");
     const details = ` - ${nominal} (${entry.category}) [${telegramWorkspaceLabels[entry.workspace_type]}] · `;
-    const labelBudget = lineBudget - "Tercatat! ".length - details.length;
+    const dateLine = `\n${transactionTypeLabels[entry.type]} · Tanggal: ${receiptDate.format(new Date(entry.occurred_at))}`;
+    const labelBudget = lineBudget - "Tercatat! ".length - details.length - dateLine.length;
     const walletLabel = displayText(wallet, Math.max(Math.floor(labelBudget / 2), labelBudget - item.length));
-    return `Tercatat! ${displayText(item, labelBudget - walletLabel.length)}${details}${walletLabel}`;
+    return `Tercatat! ${displayText(item, labelBudget - walletLabel.length)}${details}${walletLabel}${dateLine}`;
   });
-  const keyboard: TelegramInlineKeyboard = transactions.map(({ id, workspace_type, can_move }) => [
-    { text: "Edit", callback_data: `edit:${id}` },
-    { text: "Hapus", callback_data: `delete:${id}` },
-    ...(can_move ? [workspace_type === "personal"
-      ? { text: "Pindah ke Rumah Tangga", callback_data: `move:household:${id}` }
-      : { text: "Pindah ke Pribadi", callback_data: `move:personal:${id}` }] : []),
-  ]);
-  return { text: lines.join("\n"), keyboard };
+  const keyboard: TelegramInlineKeyboard = transactions.flatMap(({ id, type, workspace_type, can_move }) => {
+    const nextType = type === "income" ? "expense" : "income";
+    const nextWorkspace = workspace_type === "personal" ? "household" : "personal";
+    return [
+      [{ text: "Edit", callback_data: `edit:${id}` }, { text: "Hapus", callback_data: `delete:${id}` }],
+      [
+        ...(can_move ? [{ text: `Pindah ke ${telegramWorkspaceLabels[nextWorkspace]}`, callback_data: `move:${nextWorkspace}:${id}` }] : []),
+        { text: `Ubah ke ${transactionTypeLabels[nextType]}`, callback_data: `flip:${nextType}:${id}` },
+      ],
+    ];
+  });
+  return { text: lines.join("\n\n"), keyboard };
 }
 
 function replyWithTransactions(userId: number, transactions: TransactionReceipt[]) {
@@ -131,8 +143,10 @@ async function handleWorkspaceCommand(userId: number, workspaceType: WorkspaceTy
   return reply(userId, workspaceStatus(workspaceType), workspaceKeyboard);
 }
 
-function replyQuickMenu(userId: number) {
-  return reply(userId, "Akses cepat DompetBareng\nPilih menu di bawah. Gunakan tag #pribadi atau #rt pada perintah untuk memilih ruang.", quickMenu);
+function replyQuickMenu(userId: number, help = false) {
+  const menu = "Akses cepat DompetBareng\nPilih menu di bawah. Gunakan tag #pribadi atau #rt pada perintah untuk memilih ruang.";
+  const examples = "\n\nContoh pemasukan: gaji 5jt bank atau +500rb bonus #rt.\nTanggal lampau: bensin 50rb 15/11/2026 atau makan 25rb kemarin.";
+  return reply(userId, menu + (help ? examples : ""), quickMenu);
 }
 
 async function replyQuickReport(query: Parameters<typeof getTelegramQuickReport>[0], editMessageId?: number) {
@@ -154,8 +168,8 @@ async function replyQuickReport(query: Parameters<typeof getTelegramQuickReport>
   return reply(userId, messages[last], keyboard);
 }
 
-function handleQuickCommand({ userId, view, workspaceType, argument, conflicts }: TelegramQuickCommand) {
-  if (view === "menu") return replyQuickMenu(userId);
+function handleQuickCommand({ userId, view, help, workspaceType, argument, conflicts }: TelegramQuickCommand) {
+  if (view === "menu") return replyQuickMenu(userId, help);
   if (conflicts) return reply(userId, "Pilih satu tag ruang, #pribadi atau #rt.");
   if (view === "monthly") {
     const month = parseTelegramReportMonth(argument);
@@ -208,6 +222,10 @@ async function handleMove({ queryId, userId, messageId, transactionId, targetWor
   }
 
   await answerTelegramCallback(queryId, `Transaksi dipindahkan ke ${telegramWorkspaceLabels[moved.transaction.workspace_type]}.`).catch(() => {});
+  return refreshTransactionReply(userId, messageId, messageTransactionIds);
+}
+
+async function refreshTransactionReply(userId: number, messageId: number, messageTransactionIds: string[]) {
   const transactions = await getTelegramTransactionReceipts(userId, messageTransactionIds);
   if (transactions.length) {
     const { text, keyboard } = transactionMessage(transactions);
@@ -216,10 +234,18 @@ async function handleMove({ queryId, userId, messageId, transactionId, targetWor
   return emptyResponse();
 }
 
+async function handleFlip({ queryId, userId, messageId, transactionId, targetType, messageTransactionIds }: Extract<TelegramCallback, { action: "flip" }>) {
+  const transaction = await flipTelegramTransaction(userId, transactionId, targetType, queryId);
+  const confirmation = transaction ? `Tipe transaksi: ${transactionTypeLabels[transaction.type]}.` : missingTransaction;
+  await answerTelegramCallback(queryId, confirmation).catch(() => {});
+  return transaction ? refreshTransactionReply(userId, messageId, messageTransactionIds) : emptyResponse();
+}
+
 async function handleCallback(callback: TelegramCallback) {
   if (callback.action === "quick") return handleQuickCallback(callback);
   if (callback.action === "workspace") return handleWorkspaceCallback(callback);
   if (callback.action === "move") return handleMove(callback);
+  if (callback.action === "flip") return handleFlip(callback);
 
   const { queryId, userId, transactionId, action } = callback;
   if (action === "delete") {
@@ -245,7 +271,11 @@ async function handleCallback(callback: TelegramCallback) {
   return emptyResponse();
 }
 
-async function handleInput(message: TelegramMessage & { workspaceType?: WorkspaceType }, parsedText: string | undefined) {
+async function handleInput(
+  message: TelegramMessage & { workspaceType?: WorkspaceType },
+  parsedText: string | undefined,
+  forcedType: TransactionDraft["type"] | undefined,
+) {
   const limit = getDailyAiLimit();
   const claim = await beginTelegramInput(message, limit);
   switch (claim.status) {
@@ -261,10 +291,21 @@ async function handleInput(message: TelegramMessage & { workspaceType?: Workspac
   if (claim.status !== "ready") return emptyResponse();
 
   try {
-    let drafts: TransactionDraft[];
+    const sentAt = new Date(message.date * 1000);
+    const occurredAt = Number.isFinite(sentAt.getTime()) ? sentAt : new Date();
+    const referenceDate = currentTransactionDate(occurredAt);
+    const explicitDates = readExplicitTransactionDates(parsedText, referenceDate);
+    let drafts: TelegramTransactionDraft[];
     try {
       const image = message.photo ? await downloadTelegramImage(message.photo) : undefined;
-      drafts = await parseTransactions({ text: parsedText, image, existing: claim.existing });
+      const predictions = await parseTransactions({ text: parsedText, image, existing: claim.existing, forcedType, referenceDate });
+      drafts = predictions.map(({ transaction_date: extractedDate, ...draft }) => {
+        const explicitDate = explicitDates.find((date) => date === extractedDate) ?? explicitDates[0];
+        const date = explicitDate ?? (image ? extractedDate : undefined);
+        const cleanType = readTelegramTransactionType(readTelegramWorkspaceTags(draft.item).text);
+        const item = stripTransactionDates(cleanType.text ?? "") || transactionTypeLabels[draft.type];
+        return { ...draft, item, ...(date && { occurred_at: date }) };
+      });
     } catch (error) {
       if (!(error instanceof TelegramImageInputError)) throw error;
       drafts = [];
@@ -275,7 +316,7 @@ async function handleInput(message: TelegramMessage & { workspaceType?: Workspac
       claim.claim_token,
       drafts,
       message.text ?? null,
-      new Date(message.date * 1000).toISOString(),
+      occurredAt.toISOString(),
     );
 
     switch (result.status) {
@@ -351,22 +392,24 @@ export async function POST(request: Request) {
     const message = readTelegramMessage(update);
     if (!message) return emptyResponse();
     userId = message.userId;
-    if (!message.photo && message.text?.startsWith("/")) {
-      return message.text === "/start"
+    const tagged = readTelegramWorkspaceTags(message.text);
+    const input = readTelegramTransactionType(tagged.text);
+    if (!message.photo && message.text?.trimStart().startsWith("/") && !input.incomeCommand) {
+      return message.text.trim() === "/start"
         ? reply(message.userId, `Kirim teks transaksi atau foto struk/QRIS. ${connectTelegram}`)
         : emptyResponse();
     }
-    const tagged = readTelegramWorkspaceTags(message.text);
     if (tagged.conflicts) {
       return reply(message.userId, "Pilih satu tag ruang untuk transaksi ini, lalu kirim ulang.");
     }
-    if (!tagged.text && !message.photo) {
+    if (input.conflicts) return reply(message.userId, "Pilih satu penanda tipe, #masuk atau #keluar.");
+    if (!input.text && !message.photo) {
       return reply(message.userId, "Tulis transaksi beserta nominal atau kirim foto struk.");
     }
     return await handleInput({
       ...message,
       workspaceType: message.replyToPromptId ? undefined : tagged.workspaceType,
-    }, tagged.text);
+    }, input.text, input.forcedType);
   } catch {
     console.warn("[telegram] webhook handler failed");
     if (callbackId) await answerTelegramCallback(callbackId).catch(() => {});

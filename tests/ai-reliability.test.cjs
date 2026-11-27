@@ -66,6 +66,9 @@ require.extensions[".ts"] = (module, filename) => {
 const { generateMonthlyAnalysis } = require("../src/lib/gemini.ts");
 const { POST: monthly } = require("../src/app/api/reports/monthly/route.ts");
 const { POST: webhook } = require("../src/app/api/webhook/telegram/route.ts");
+const { getDailyAiLimit } = require("../src/lib/ai-quota.ts");
+const { readTelegramTransactionType } = require("../src/lib/telegram.ts");
+const { currentTransactionDate, readExplicitTransactionDates, stripTransactionDates } = require("../src/lib/transaction-date.ts");
 
 beforeEach(() => {
   Object.assign(process.env, config);
@@ -191,7 +194,7 @@ test("Telegram commands bypass extraction and Gemini 503 releases the claim with
         : { ...report, month: args.p_month, net_cash_flow: "0", savings_ratio_percent: null, top_expenses: [] };
     }
     if (name === "begin_telegram_input_in_workspace") {
-      assert.equal(args.p_daily_limit, 80);
+      assert.equal(args.p_daily_limit, 60);
       assert.equal(args.p_update_id, 3);
       if (claimed) return { status: "duplicate" };
       claimed = true;
@@ -229,10 +232,13 @@ test("Telegram uses a configured cap of 60 and acknowledges internal errors", as
     assert.equal(name, "finish_telegram_input");
     consumed++;
     return { status: "saved", transactions: [{ id: claimToken, item: "Kopi", amount: "15000", category: "Makan & Minum",
+      type: "expense", occurred_at: args.p_occurred_at,
       workspace_id: workspace, workspace_name: "Pribadi", workspace_type: "personal", wallet_id: account, wallet_name: "Tunai", can_move: false }] };
   };
 
-  assert.equal((await webhook(telegramRequest(9, "Kopi 15rb"))).status, 200);
+  const accepted = await webhook(telegramRequest(9, "Kopi 15rb"));
+  assert.equal(accepted.status, 200);
+  assert.match((await accepted.json()).text, /-Rp15\.000.*\nPengeluaran · Tanggal:/);
   assert.equal(consumed, 60);
   const limited = await webhook(telegramRequest(10, "Kopi 15rb"));
   assert.equal(limited.status, 200);
@@ -244,4 +250,56 @@ test("Telegram uses a configured cap of 60 and acknowledges internal errors", as
   assert.equal((await webhook(malformed)).status, 200);
   assert.equal((await webhook(telegramRequest(12, "Kopi 15rb", "wrong-secret"))).status, 401);
   assert.equal(providerCalls.length, 1);
+});
+
+test("the daily extraction default is 60 and the deployment override remains configurable", () => {
+  assert.equal(getDailyAiLimit(), 60);
+  process.env.TELEGRAM_DAILY_AI_LIMIT = "80";
+  assert.equal(getDailyAiLimit(), 80);
+});
+
+test("Telegram detects income and expense markers before extraction", () => {
+  assert.equal(readTelegramTransactionType("/saldo").incomeCommand, false);
+  for (const example of ["/MASUK 350rb bonus", "/Pemasukan 350rb bonus", "+350rb bonus", "350rb bonus #IN", "350rb bonus #masuk"]) {
+    const input = readTelegramTransactionType(example);
+    assert.equal(input.forcedType, "income");
+    assert.equal(input.text, "350rb bonus");
+  }
+  const expense = readTelegramTransactionType("bayar invoice #PENGELUARAN");
+  assert.equal(expense.forcedType, "expense");
+  assert.equal(expense.text, "bayar invoice");
+  assert.equal(readTelegramTransactionType("+350rb bonus #out").conflicts, true);
+});
+
+test("Indonesian backdates resolve on the WIB calendar without leaving dates in descriptions", () => {
+  const today = currentTransactionDate(new Date("2026-11-26T17:30:00Z"));
+  assert.equal(today, "2026-11-27");
+  for (const example of ["15/11/2026", "15-11-2026", "2026-11-15", "15 Nov 2026", "15 November 2026", "tgl 15/11/2026", "15 Nov", "15/11"]) {
+    assert.deepEqual(readExplicitTransactionDates(`bonus ${example}`, today), ["2026-11-15"]);
+    assert.equal(stripTransactionDates(`Bonus - ${example}`), "Bonus");
+  }
+  assert.deepEqual(readExplicitTransactionDates("kemarin dan 2 hari lalu", today), ["2026-11-26", "2026-11-25"]);
+  assert.deepEqual(readExplicitTransactionDates("31/02/2026", today), [today]);
+  assert.deepEqual(readExplicitTransactionDates("beras 1/2 kg", today), []);
+});
+
+test("Telegram stores an explicit income and backdate even if the provider guesses expense", async (t) => {
+  t.mock.method(console, "info", () => {});
+  provider = () => [{ ...draft[0], item: "+Bonus 15/11/2026 #Masuk", amount: "350000", transaction_date: "2026-11-16" }];
+  rpc = (_role, name, args) => {
+    if (name === "begin_telegram_input_in_workspace") return { status: "ready", claim_token: claimToken };
+    assert.equal(name, "finish_telegram_input");
+    assert.deepEqual(args.p_transactions, [{ item: "Bonus", amount: "350000", type: "income", category: "Lainnya",
+      wallet_type: "cash", occurred_at: "2026-11-15" }]);
+    return { status: "saved", transactions: [{ ...args.p_transactions[0], id: claimToken, occurred_at: "2026-11-14T17:00:00Z",
+      workspace_id: workspace, workspace_name: "Pribadi", workspace_type: "personal", wallet_id: account, wallet_name: "Tunai", can_move: true }] };
+  };
+
+  const response = await webhook(telegramRequest(13, "+350rb bonus 15/11/2026"));
+  assert.equal(response.status, 200);
+  const message = await response.json();
+  assert.match(message.text, /Bonus - \+Rp350\.000.*\nPemasukan · Tanggal: 15 Nov 2026/);
+  assert.deepEqual(message.reply_markup.inline_keyboard.map((row) => row.map((button) => button.text)), [
+    ["Edit", "Hapus"], ["Pindah ke Rumah Tangga", "Ubah ke Pengeluaran"],
+  ]);
 });

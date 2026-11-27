@@ -150,6 +150,7 @@ export function readTelegramQuickCommand(update: unknown) {
   return {
     userId: envelope.userId,
     view,
+    help: command[1].toLowerCase() === "bantuan",
     argument: tagged.text?.trim() ?? "",
     workspaceType: tagged.workspaceType,
     conflicts: tagged.conflicts,
@@ -168,6 +169,32 @@ export function readTelegramWorkspaceTags(text: string | undefined) {
     workspaceType: choices.size === 1 ? choices.values().next().value : undefined,
     conflicts: choices.size > 1,
     text: choices.size ? withoutTags?.replace(/[^\S\r\n]{2,}/g, " ").trim() || undefined : text,
+  };
+}
+
+const transactionTypeTag = /(?<![\p{L}\p{N}_#/@])#(masuk|pemasukan|in|keluar|pengeluaran|out)(?![\p{L}\p{N}_])/giu;
+
+export function readTelegramTransactionType(text: string | undefined) {
+  const directions = new Set<"income" | "expense">();
+  let content = text?.replace(transactionTypeTag, (_tag, label: string) => {
+    directions.add(/^(masuk|pemasukan|in)$/i.test(label) ? "income" : "expense");
+    return "";
+  }).trim() ?? "";
+  const command = /^\/(?:masuk|pemasukan)(?:@([A-Za-z0-9_]+))?(?=\s|$)/i.exec(content);
+  const incomeCommand = command !== null && matchesBotAlias(command[1]);
+  if (incomeCommand) {
+    directions.add("income");
+    content = content.slice(command[0].length).trimStart();
+  }
+  if (content.startsWith("+")) {
+    directions.add("income");
+    content = content.slice(1).trimStart();
+  }
+  return {
+    text: content.replace(/[^\S\r\n]{2,}/g, " ") || undefined,
+    forcedType: directions.size === 1 ? directions.values().next().value : undefined,
+    conflicts: directions.size > 1,
+    incomeCommand,
   };
 }
 
@@ -274,12 +301,13 @@ function originalTransactionIds(message: Record<string, unknown>) {
   if (!isRecord(markup) || !Array.isArray(markup.inline_keyboard)) return [];
 
   const ids = new Set<string>();
-  for (const row of markup.inline_keyboard.slice(0, 20)) {
+  for (const row of markup.inline_keyboard.slice(0, 40)) {
     if (!Array.isArray(row)) continue;
     const button = row.find((candidate) => isRecord(candidate) &&
       typeof candidate.callback_data === "string" && candidate.callback_data.startsWith("edit:"));
     const id: unknown = button?.callback_data.slice(5);
     if (isTransactionId(id)) ids.add(id.toLowerCase());
+    if (ids.size === 20) break;
   }
   return [...ids];
 }
@@ -309,16 +337,16 @@ export function readTelegramCallback(update: unknown) {
   if (parts.length === 2 && action === "workspace" && isWorkspaceType(option)) {
     return { ...base, action, workspaceType: option } as const;
   }
-  if (parts.length === 3 && action === "move" && isWorkspaceType(option) && isTransactionId(id)) {
+  if (parts.length === 3 && (action === "move" || action === "flip") && isTransactionId(id)) {
     const transactionId = id.toLowerCase();
-    const messageTransactionIds = originalTransactionIds(message);
-    return {
+    const originalIds = originalTransactionIds(message);
+    const target = {
       ...base,
-      action,
-      targetWorkspaceType: option,
       transactionId,
-      messageTransactionIds: messageTransactionIds.includes(transactionId) ? messageTransactionIds : [transactionId],
+      messageTransactionIds: originalIds.includes(transactionId) ? originalIds : [transactionId],
     } as const;
+    if (action === "move" && isWorkspaceType(option)) return { ...target, action, targetWorkspaceType: option } as const;
+    if (action === "flip" && (option === "income" || option === "expense")) return { ...target, action, targetType: option } as const;
   }
   if (parts.length === 2 && (action === "edit" || action === "delete") && isTransactionId(option)) {
     return { ...base, action, transactionId: option } as const;

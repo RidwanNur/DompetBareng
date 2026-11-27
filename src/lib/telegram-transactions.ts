@@ -16,10 +16,14 @@ type InputClaim =
   | { status: "ready"; claim_token: string; existing?: TransactionDraft }
   | { status: "unlinked" | "duplicate" | "busy" | "rate_limited" | "not_found" | "workspace_unavailable" };
 
+export type TelegramTransactionDraft = TransactionDraft & { occurred_at?: string };
+
 export type TransactionReceipt = {
   id: string;
   item: string;
   amount: Rupiah;
+  type: TransactionDraft["type"];
+  occurred_at: string;
   category: string;
   workspace_id: string;
   workspace_name: string;
@@ -61,6 +65,8 @@ function isReceipt(value: unknown): value is TransactionReceipt {
     isUuid(receipt.id) &&
     typeof receipt.item === "string" &&
     typeof receipt.amount === "string" && /^[1-9][0-9]*$/.test(receipt.amount) &&
+    (receipt.type === "income" || receipt.type === "expense") &&
+    typeof receipt.occurred_at === "string" && Number.isFinite(Date.parse(receipt.occurred_at)) &&
     typeof receipt.category === "string" &&
     isUuid(receipt.workspace_id) &&
     typeof receipt.workspace_name === "string" &&
@@ -74,7 +80,7 @@ function isReceipt(value: unknown): value is TransactionReceipt {
 export async function finishTelegramInput(
   input: TelegramInput,
   claimToken: string,
-  transactions: TransactionDraft[],
+  transactions: TelegramTransactionDraft[],
   rawInput: string | null,
   occurredAt: string,
 ): Promise<InputResult> {
@@ -105,6 +111,22 @@ export async function getTelegramTransactionReceipts(userId: number, transaction
     throw new Error("Ringkasan transaksi Telegram belum bisa dibaca.");
   }
   return data;
+}
+
+export async function flipTelegramTransaction(
+  userId: number, transactionId: string, targetType: TransactionDraft["type"], operationId: string,
+): Promise<TransactionReceipt | null> {
+  const { data, error } = await createAdminClient().rpc("flip_telegram_transaction", {
+    p_telegram_user_id: userId,
+    p_transaction_id: transactionId,
+    p_target_type: targetType,
+    p_operation_id: operationId,
+  });
+  if (!error && (data?.status === "flipped" || data?.status === "already_flipped") && isReceipt(data.transaction)) {
+    return data.transaction;
+  }
+  if (!error && ["not_found", "invalid_input", "conflict"].includes(data?.status)) return null;
+  throw new Error("Tipe transaksi Telegram belum bisa diubah.");
 }
 
 export async function getTelegramWorkspaceState(userId: number): Promise<{ active_workspace_type: WorkspaceType; has_household: boolean } | null> {
